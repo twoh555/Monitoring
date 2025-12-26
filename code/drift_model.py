@@ -9,7 +9,8 @@ def calculate_drift_probability(
     kp, L, vd, cp,
     wind_speed, wind_dir, grid_km,
     dxy=10.0,
-    pollen_factor=5000000.0
+    pollen_factor=5000000.0,
+    return_full_grid=False
 ):
     """
     计算非转基因区域内的基因漂移概率。
@@ -56,33 +57,38 @@ def calculate_drift_probability(
         print(f"[DriftModel] Error calculating recipient concentration: {e}")
         raise e
 
-    # 2. 提取非转基因区域内的子网格
+    # 2. 提取非转基因区域内的子网格 (如果 return_full_grid=False)
     # 假设模型坐标系原点(0,0)即为非转基因区域中心
-    radius = float(non_gm_radius)
     
-    # x_full 和 y_full 应该是 meshgrid 产生的
-    # x 随列变化 (axis 1), y 随行变化 (axis 0)
-    # y 从小到大 (bottom to top) 还是从大到小? 
-    # gaussian_plume_model 中: y_vals = np.arange(-half, half + dxy, dxy) -> 从小到大
-    # 所以 row 0 是 y_min (底部), row -1 是 y_max (顶部)
-    
-    # 找到索引范围
-    # x[0, :] 是第一行的 x 坐标序列
-    x_indices = np.where((x_full[0, :] >= -radius) & (x_full[0, :] <= radius))[0]
-    # y[:, 0] 是第一列的 y 坐标序列
-    y_indices = np.where((y_full[:, 0] >= -radius) & (y_full[:, 0] <= radius))[0]
-    
-    if len(x_indices) == 0 or len(y_indices) == 0:
-        raise ValueError("非转基因区域内没有网格点 (分辨率不足或半径太小)")
+    if return_full_grid:
+        print("[DriftModel] 返回完整网格数据")
+        x_sub = x_full
+        y_sub = y_full
+        conc_donor_sub = conc_donor_full
+        conc_recipient_sub = conc_recipient_full
+    else:
+        radius = float(non_gm_radius)
+        
+        # x_full 和 y_full 应该是 meshgrid 产生的
+        # ... (保留原有注释)
+        
+        # 找到索引范围
+        x_indices = np.where((x_full[0, :] >= -radius) & (x_full[0, :] <= radius))[0]
+        y_indices = np.where((y_full[:, 0] >= -radius) & (y_full[:, 0] <= radius))[0]
+        
+        if len(x_indices) == 0 or len(y_indices) == 0:
+            # 如果选中区域太小或分辨率不够，至少返回中心点附近 3x3
+            # 或者抛出异常。这里尝试回退到完整网格或抛出异常
+            # 暂时保持抛出异常
+            raise ValueError("非转基因区域内没有网格点 (分辨率不足或半径太小)")
 
-    # 使用 np.ix_ 提取子块
-    # 注意：这里确保了提取出的矩阵保持 (y, x) 的结构
-    ix_grid = np.ix_(y_indices, x_indices)
-    
-    x_sub = x_full[ix_grid]
-    y_sub = y_full[ix_grid]
-    conc_donor_sub = conc_donor_full[ix_grid]
-    conc_recipient_sub = conc_recipient_full[ix_grid]
+        # 使用 np.ix_ 提取子块
+        ix_grid = np.ix_(y_indices, x_indices)
+        
+        x_sub = x_full[ix_grid]
+        y_sub = y_full[ix_grid]
+        conc_donor_sub = conc_donor_full[ix_grid]
+        conc_recipient_sub = conc_recipient_full[ix_grid]
     
     # --- 调试信息 ---
     print(f"[DriftModel] Subgrid shape: {x_sub.shape}")

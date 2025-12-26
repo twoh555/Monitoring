@@ -199,7 +199,8 @@ class DriftCalculatorThread(QThread):
                 self.kp, self.L, self.vd, self.cp,
                 self.wind_speed, self.wind_dir, self.grid_km,
                 dxy=self.dxy,
-                pollen_factor=self.pollen_factor
+                pollen_factor=self.pollen_factor,
+                return_full_grid=True  # 总是返回完整网格以便绘制全局图
             )
             print("[漂移线程] 计算完成")
             self.finished.emit(x_sub, y_sub, G_percent)

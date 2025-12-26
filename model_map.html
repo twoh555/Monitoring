@@ -184,6 +184,159 @@
                          return false;
                      }
                  }
+
+                 // ===== 选择逻辑：支持左键点击为主，右键为辅；容器像素坐标作为兜底 =====
+                 // 禁用默认右键菜单，避免拦截地图事件
+                 document.addEventListener('contextmenu', function(ev){ ev.preventDefault(); return false; });
+                 
+                 // 选择状态与接口
+                 window._selectionMode = null; // 'gm' 或 'non_gm'
+                 window._selectionRadius = 50.0;
+                 window._gmSelection = null;
+                 window._nonGmSelection = null;
+
+                 window.setSelectionRadius = function(r){
+                     try { window._selectionRadius = (typeof r === 'number' && r > 0) ? r : 50.0; return true; } catch(e){ return false; }
+                 };
+                 
+                 window.setSelectionMode = function(mode){
+                     window._selectionMode = mode;
+                     var modeName = (mode === 'gm') ? '转基因区域(红)' : ((mode === 'non_gm') ? '非转基因区域(蓝)' : '无');
+                     document.getElementById('debug').textContent = '当前框选模式: ' + modeName + '。请在地图上右键框选。';
+                 };
+
+                 window.resetSelection = function(){
+                     try {
+                         window._selectionMode = null;
+                         window._gmSelection = null;
+                         window._nonGmSelection = null;
+                         if (window._gmRectangle) { try { map.removeOverlay(window._gmRectangle); } catch(e){} window._gmRectangle = null; }
+                         if (window._nonGmRectangle) { try { map.removeOverlay(window._nonGmRectangle); } catch(e){} window._nonGmRectangle = null; }
+                         document.getElementById('debug').textContent = '已重置选择。请点击上方按钮激活框选模式。';
+                         return true;
+                     } catch(e){ return false; }
+                 };
+
+                window.updateSelectionPosition = function(mode, lat, lng){
+                    try {
+                        var center = new BMap.Point(lng, lat);
+                        var r = 50.0;
+                        if (mode === 'gm' && window._gmSelection) r = window._gmSelection.radius;
+                        if (mode === 'gm' && window._gmSelection == null) r = window._selectionRadius || 50.0;
+                        
+                        if (mode === 'non_gm' && window._nonGmSelection) r = window._nonGmSelection.radius;
+                        if (mode === 'non_gm' && window._nonGmSelection == null) r = window._selectionRadius || 50.0;
+
+                        if (mode === 'gm') {
+                            if (window._gmRectangle) { try { map.removeOverlay(window._gmRectangle); } catch(ex){} window._gmRectangle = null; }
+                            var rect = createAreaRectangle(center, r, 'red');
+                            map.addOverlay(rect);
+                            window._gmRectangle = rect;
+                            window._gmSelection = { lng: parseFloat(lng), lat: parseFloat(lat), radius: parseFloat(r) };
+                            document.getElementById('debug').textContent = '已对齐转基因区域位置。';
+                        } else if (mode === 'non_gm') {
+                            if (window._nonGmRectangle) { try { map.removeOverlay(window._nonGmRectangle); } catch(ex){} window._nonGmRectangle = null; }
+                            var rect = createAreaRectangle(center, r, 'blue');
+                            map.addOverlay(rect);
+                            window._nonGmRectangle = rect;
+                            window._nonGmSelection = { lng: parseFloat(lng), lat: parseFloat(lat), radius: parseFloat(r) };
+                            document.getElementById('debug').textContent = '已对齐非转基因区域位置。';
+                        }
+                        return true;
+                    } catch(err) {
+                        console.error(err);
+                        return false;
+                    }
+                };
+                 
+                 window.getSelectedAreas = function(){
+                     try {
+                         var gm = window._gmSelection ? {lng: parseFloat(window._gmSelection.lng), lat: parseFloat(window._gmSelection.lat), radius: parseFloat(window._gmSelection.radius)} : null;
+                         var non = window._nonGmSelection ? {lng: parseFloat(window._nonGmSelection.lng), lat: parseFloat(window._nonGmSelection.lat), radius: parseFloat(window._nonGmSelection.radius)} : null;
+                         return { gm: gm, non: non };
+                     } catch(e){ return { gm: null, non: null }; }
+                 };
+
+                 function createAreaRectangle(center, radius, color){
+                     var sideLength = radius * 2;
+                     var latOffset = sideLength / 111000.0;
+                     var lngOffset = sideLength / (111000.0 * Math.cos(center.lat * Math.PI / 180));
+                     var sw = new BMap.Point(center.lng - lngOffset/2, center.lat - latOffset/2);
+                     var ne = new BMap.Point(center.lng + lngOffset/2, center.lat + latOffset/2);
+                     var nw = new BMap.Point(sw.lng, ne.lat);
+                     var se = new BMap.Point(ne.lng, sw.lat);
+                     return new BMap.Polygon([sw, nw, ne, se], {
+                         strokeColor: color,
+                         strokeWeight: 4,
+                         strokeOpacity: 1.0,
+                         fillColor: color,
+                         fillOpacity: 0.35
+                     });
+                 }
+
+                 // 选择防抖
+                 window._selectionGuard = false;
+                 function performSelection(center, source){
+                     try {
+                         if (window._selectionGuard) return;
+                         window._selectionGuard = true;
+                         setTimeout(function(){ window._selectionGuard = false; }, 200);
+                         
+                         if (!window._selectionMode) {
+                             document.getElementById('debug').textContent = '请先点击上方按钮激活框选模式！';
+                             return;
+                         }
+
+                         var r = window._selectionRadius || 500.0;
+                         
+                         if (window._selectionMode === 'gm') {
+                             if (window._gmRectangle) { try { map.removeOverlay(window._gmRectangle); } catch(ex){} window._gmRectangle = null; }
+                             var rect = createAreaRectangle(center, r, 'red');
+                             map.addOverlay(rect);
+                             window._gmRectangle = rect;
+                             window._gmSelection = { lng: parseFloat(center.lng), lat: parseFloat(center.lat), radius: parseFloat(r) };
+                             document.getElementById('debug').textContent = '已更新转基因区域（红）。';
+                         } else if (window._selectionMode === 'non_gm') {
+                             if (window._nonGmRectangle) { try { map.removeOverlay(window._nonGmRectangle); } catch(ex){} window._nonGmRectangle = null; }
+                             var rect2 = createAreaRectangle(center, r, 'blue');
+                             map.addOverlay(rect2);
+                             window._nonGmRectangle = rect2;
+                             window._nonGmSelection = { lng: parseFloat(center.lng), lat: parseFloat(center.lat), radius: parseFloat(r) };
+                             document.getElementById('debug').textContent = '已更新非转基因区域（蓝）。';
+                         }
+                     } catch(err) {
+                         document.getElementById('debug').textContent = '选择失败: ' + err.message;
+                     }
+                 }
+
+                 // 显式开启地图点击事件
+                 if (map.enableMapClick) { map.enableMapClick(true); }
+                 
+                 if (map.addEventListener) {
+                     // 统一使用右键
+                     map.addEventListener('rightclick', function(e){
+                         try {
+                             var center = e && e.point ? e.point : map.getCenter();
+                             performSelection(center, 'rightclick');
+                         } catch(err) {
+                             document.getElementById('debug').textContent = '地图rightclick选择失败: ' + err.message;
+                         }
+                     });
+                 }
+
+                 // 容器层点击作为后备
+                 (function(){
+                     var containerEl = document.getElementById('container');
+                     function selectAtPixel(ev){
+                         try {
+                             return; // 暂禁用容器点击，避免冲突
+                         } catch(err) {
+                             document.getElementById('debug').textContent = '容器click选择失败: ' + err.message;
+                         }
+                     }
+                     containerEl.addEventListener('click', function(ev){ selectAtPixel(ev); });
+                     containerEl.addEventListener('contextmenu', function(ev){ ev.preventDefault(); selectAtPixel(ev); });
+                 })();
              </script>
          </body>
          </html>

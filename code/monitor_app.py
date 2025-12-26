@@ -903,7 +903,7 @@ class MonitorApp(QMainWindow):
         
         row_n = QHBoxLayout()
         row_n.addWidget(QLabel("向北+/南-(m):"))
-        self.offset_n_input = QLineEdit("-150")
+        self.offset_n_input = QLineEdit("-50")
         self.offset_n_input.setPlaceholderText("负数=向南")
         self.offset_n_input.setFixedWidth(200)
         row_n.addWidget(self.offset_n_input)
@@ -931,7 +931,7 @@ class MonitorApp(QMainWindow):
         
         row_d = QHBoxLayout()
         row_d.addWidget(QLabel("边界间距:"))
-        self.polar_dist_input = QLineEdit("150")
+        self.polar_dist_input = QLineEdit("50")
         self.polar_dist_input.setFixedWidth(200)
         row_d.addWidget(self.polar_dist_input)
         row_d.addStretch()
@@ -1783,14 +1783,15 @@ class MonitorApp(QMainWindow):
         gs_right = gs_main[0, 1].subgridspec(2, 1, hspace=0.4)
         
         # 初始化4个子图
-        # ax1: 左边第一个热力图
+        # ax1: 左边第一个热力图 (改为全局花粉+轮廓)
         self.drift_ax1 = self.drift_fig.add_subplot(gs_left[0, 0])
-        # ax2: 左边第二个热力图
+        # ax2: 左边第二个热力图 (改为局部花粉+轮廓)
         self.drift_ax2 = self.drift_fig.add_subplot(gs_left[0, 1])
-        # ax3: 右上统计图
+        # ax3: 右上统计图 (平均漂移概率)
         self.drift_ax3 = self.drift_fig.add_subplot(gs_right[0, 0])
-        # ax4: 右下统计图
+        # ax4: 右下 (改为显示安全距离数值，不再绘制图表)
         self.drift_ax4 = self.drift_fig.add_subplot(gs_right[1, 0])
+        self.drift_ax4.axis('off') # 关闭坐标轴用于显示纯文本
         
         # 调整全局边距
         self.drift_fig.subplots_adjust(left=0.05, right=0.98, top=0.92, bottom=0.15)
@@ -1899,14 +1900,14 @@ class MonitorApp(QMainWindow):
             import traceback
             print(traceback.format_exc())
 
-    def on_drift_calculation_finished(self, x_sub, y_sub, G_percent):
+    def on_drift_calculation_finished(self, x_full, y_full, G_full):
         """基因漂移计算完成回调"""
         try:
             # 保存计算结果供导出
             self.latest_drift_data = {
-                "x": x_sub,
-                "y": y_sub,
-                "G_percent": G_percent
+                "x": x_full,
+                "y": y_full,
+                "G_percent": G_full
             }
 
             # 重新获取完整数据用于底图范围（因为线程只返回了局部结果）
@@ -1915,8 +1916,8 @@ class MonitorApp(QMainWindow):
                 self.loading_timer.stop()
                 return
             
-            x_full = self.latest_model_data.get("x")
-            y_full = self.latest_model_data.get("y")
+            # 从 latest_model_data 获取 basemap_path (无需 conc)
+            # conc_donor = self.latest_model_data.get("conc")
             basemap_path = self.latest_model_data.get("basemap_path")
 
             # 5) 绘图
@@ -1924,29 +1925,42 @@ class MonitorApp(QMainWindow):
             self.drift_ax2.clear()
             self.drift_ax3.clear()
             self.drift_ax4.clear()
+            self.drift_ax4.axis('off') # 确保关闭坐标轴
             
-            extent_sub = [x_sub.min(), x_sub.max(), y_sub.min(), y_sub.max()]
-            print(f"[DEBUG] Plotting extent: {extent_sub}")
-            
-            # 动态调整颜色尺度
-            g_max_val = np.max(G_percent)
+            # 动态调整颜色尺度 (基因漂移概率)
+            # 使用 G_full 的最大值，若小于1则设为1
+            g_max_val = np.max(G_full)
             vmax_val = 1.0 if g_max_val < 1.0 else g_max_val
+            levels_prob = np.linspace(0, vmax_val, 100)
             
-            # --- 左图1：纯热力图 (Ax1) ---
-            # 使用 contourf 平滑显示
-            levels = np.linspace(0, vmax_val, 100)
+            # 准备绘图范围
+            extent_full = [x_full.min(), x_full.max(), y_full.min(), y_full.max()]
+            
+            # === 图1：基因漂移概率分布 + 地图底图 (全局视图) ===
+            self.drift_ax1.set_title("基因漂移概率分布 (地图叠加)")
+            
+            # 1. 绘制底图
+            if basemap_path and os.path.exists(basemap_path):
+                try:
+                    img = plt.imread(basemap_path)
+                    self.drift_ax1.imshow(img, extent=extent_full, aspect='auto', alpha=1.0)
+                except Exception as e:
+                    print(f"[WARN] 无法加载底图: {e}")
+            
+            # 2. 叠加热力图 (半透明)
             im1 = self.drift_ax1.contourf(
-                x_sub, y_sub, G_percent,
-                levels=levels,
-                cmap='Reds'
+                x_full, y_full, G_full,
+                levels=levels_prob,
+                cmap='Reds', # 使用 Reds 对应风险概率
+                alpha=0.6    # 半透明以便看到底图
             )
             
-            # 添加关键等高线
+            # 3. 绘制漂移概率轮廓 (1% 紫色, 0.1% 黑色)
             try:
-                # 1% 线 - 紫色
+                # 1% 线
                 if g_max_val >= 1.0:
                     cs1_purple = self.drift_ax1.contour(
-                        x_sub, y_sub, G_percent,
+                        x_full, y_full, G_full,
                         levels=[1.0],
                         colors='purple',
                         linewidths=2.0,
@@ -1954,126 +1968,275 @@ class MonitorApp(QMainWindow):
                     )
                     self.drift_ax1.clabel(cs1_purple, inline=True, fmt='1%%', fontsize=10, colors='purple')
                 
-                # 0.1% 线 - 黑色
+                # 0.1% 线
                 if g_max_val >= 0.1:
                     cs1_black = self.drift_ax1.contour(
-                        x_sub, y_sub, G_percent,
+                        x_full, y_full, G_full,
                         levels=[0.1],
                         colors='black',
                         linewidths=1.5,
                         linestyles='solid'
                     )
                     self.drift_ax1.clabel(cs1_black, inline=True, fmt='0.1%%', fontsize=10, colors='black')
-            except: pass
-            
-            self.drift_ax1.set_xlabel("相对 X 坐标 (m)")
-            self.drift_ax1.set_ylabel("相对 Y 坐标 (m)")
-            self.drift_ax1.set_title(f"热力图 (半径={self.non_gm_radius}m)")
-            # 设置显示范围与右图一致
-            radius = float(self.non_gm_radius)
-            self.drift_ax1.set_xlim(-radius, radius)
-            self.drift_ax1.set_ylim(-radius, radius)
+            except Exception as e:
+                print(f"[WARN] 绘制轮廓失败: {e}")
+
+            # 4. 在全局图中框出非转基因区域
+            try:
+                # 假设 Non-GM 中心在 (0,0) (相对坐标)
+                # 实际上 x_full, y_full 已经是相对坐标了
+                non_gm_rect_global = plt.Rectangle(
+                    (-self.non_gm_radius, -self.non_gm_radius), 
+                    self.non_gm_radius*2, self.non_gm_radius*2,
+                    fill=False, color='blue', linewidth=2, linestyle='--', label='Non-GM'
+                )
+                self.drift_ax1.add_patch(non_gm_rect_global)
+            except Exception as e:
+                print(f"[WARN] 绘制非转基因框失败: {e}")
+
+            self.drift_ax1.set_xlabel("X (m)")
+            self.drift_ax1.set_ylabel("Y (m)")
             self.drift_ax1.set_aspect('equal', adjustable='box')
+
+
+            # === 图2：基因漂移概率分布 + 轮廓 (局部视图 - 仅非转基因区域) ===
+            self.drift_ax2.set_title("基因漂移概率分布 (非转基因区域)")
             
-            # --- 左图2：底图 + 热力图 (Ax2) ---
-            # 1. 绘制底图（如果有）
-            if basemap_path and os.path.exists(basemap_path):
-                try:
-                    img = plt.imread(basemap_path)
-                    # 底图对应的是整个模拟区域
-                    if x_full is not None and y_full is not None:
-                        extent_full = [x_full.min(), x_full.max(), y_full.min(), y_full.max()]
-                        self.drift_ax2.imshow(img, extent=extent_full, aspect='auto', alpha=1.0)
-                except Exception as e:
-                    print(f"[WARN] 无法加载底图: {e}")
+            # 设置显示范围为非转基因区域大小
+            limit_radius = float(self.non_gm_radius)
+            self.drift_ax2.set_xlim(-limit_radius, limit_radius)
+            self.drift_ax2.set_ylim(-limit_radius, limit_radius)
+            self.drift_ax2.set_aspect('equal', adjustable='box')
+            self.drift_ax2.set_xlabel("X (m)")
+            self.drift_ax2.set_ylabel("Y (m)")
             
-            # 2. 叠加热力图
+            # 1. 绘制相同的概率热力图
             self.drift_ax2.contourf(
-                x_sub, y_sub, G_percent,
-                levels=levels,
+                x_full, y_full, G_full,
+                levels=levels_prob,
                 cmap='Reds',
-                alpha=0.6
+                alpha=0.8
             )
             
-            # 添加关键等高线（叠加在地图底图上）
+            # 辅助函数：计算轮廓与特定直线的交点
+            def find_line_intersections(paths, line_type='x', line_val=0):
+                """
+                计算路径与 x=line_val 或 y=line_val 的交点
+                line_type: 'x' (vertical line) or 'y' (horizontal line)
+                """
+                intersections = []
+                for path in paths:
+                    verts = path.vertices
+                    for i in range(len(verts) - 1):
+                        p1 = verts[i]
+                        p2 = verts[i+1]
+                        x1, y1 = p1
+                        x2, y2 = p2
+                        
+                        if line_type == 'x': # Intersect with x = line_val
+                            if (x1 - line_val) * (x2 - line_val) <= 0: # Crosses or touches
+                                if abs(x2 - x1) > 1e-10:
+                                    y_int = y1 + (line_val - x1) * (y2 - y1) / (x2 - x1)
+                                    intersections.append((line_val, y_int))
+                        elif line_type == 'y': # Intersect with y = line_val
+                            if (y1 - line_val) * (y2 - line_val) <= 0: # Crosses or touches
+                                if abs(y2 - y1) > 1e-10:
+                                    x_int = x1 + (line_val - y1) * (x2 - x1) / (y2 - y1)
+                                    intersections.append((x_int, line_val))
+                return intersections
+
+            def get_contour_paths(cs):
+                """Helper to get paths from contour set across mpl versions"""
+                if hasattr(cs, 'collections'):
+                    return cs.collections[0].get_paths()
+                else:
+                    return cs.get_paths()
+            
+            # 统一绘制标注的函数
+            def plot_intersection_labels(ax, contour_set, color, radius):
+                paths = get_contour_paths(contour_set)
+                
+                # 1. 与 Y 轴 (x=0) 的交点
+                y_axis_ints = find_line_intersections(paths, 'x', 0)
+                for (ix, iy) in y_axis_ints:
+                    if -radius <= iy <= radius:
+                        ax.text(ix, iy, f"{iy:.1f}m", color=color, fontsize=10, fontweight='bold',
+                                ha='right', va='bottom', rotation=0)
+                        # 画一个小点
+                        ax.plot(ix, iy, 'o', color=color, markersize=4)
+
+                # 2. 与 X 轴 (y=0) 的交点
+                x_axis_ints = find_line_intersections(paths, 'y', 0)
+                for (ix, iy) in x_axis_ints:
+                    if -radius <= ix <= radius:
+                        ax.text(ix, iy, f"{ix:.1f}m", color=color, fontsize=10, fontweight='bold',
+                                ha='left', va='bottom', rotation=0)
+                        ax.plot(ix, iy, 'o', color=color, markersize=4)
+                
+                # 3. 与 顶部边框 (y=radius) 的交点
+                top_ints = find_line_intersections(paths, 'y', radius)
+                for (ix, iy) in top_ints:
+                    if -radius <= ix <= radius:
+                        ax.text(ix, iy, f"{ix:.1f}m", color=color, fontsize=10, fontweight='bold',
+                                ha='center', va='bottom') # 文字在框外上方或刚好压线
+                        ax.plot(ix, iy, 'o', color=color, markersize=4)
+
+                # 4. 与 右侧边框 (x=radius) 的交点
+                right_ints = find_line_intersections(paths, 'x', radius)
+                for (ix, iy) in right_ints:
+                    if -radius <= iy <= radius:
+                        ax.text(ix, iy, f"{iy:.1f}m", color=color, fontsize=10, fontweight='bold',
+                                ha='left', va='center')
+                        ax.plot(ix, iy, 'o', color=color, markersize=4)
+                        
+                # 5. 与 底部边框 (y=-radius) 的交点
+                bottom_ints = find_line_intersections(paths, 'y', -radius)
+                for (ix, iy) in bottom_ints:
+                    if -radius <= ix <= radius:
+                        ax.text(ix, iy, f"{ix:.1f}m", color=color, fontsize=10, fontweight='bold',
+                                ha='center', va='top')
+                        ax.plot(ix, iy, 'o', color=color, markersize=4)
+
+                # 6. 与 左侧边框 (x=-radius) 的交点
+                left_ints = find_line_intersections(paths, 'x', -radius)
+                for (ix, iy) in left_ints:
+                    if -radius <= iy <= radius:
+                        ax.text(ix, iy, f"{iy:.1f}m", color=color, fontsize=10, fontweight='bold',
+                                ha='right', va='center')
+                        ax.plot(ix, iy, 'o', color=color, markersize=4)
+
+            # 2. 绘制轮廓并标注
             try:
-                # 1% 线 - 紫色粗线
+                # 1% 线
                 if g_max_val >= 1.0:
                     cs2_purple = self.drift_ax2.contour(
-                        x_sub, y_sub, G_percent,
+                        x_full, y_full, G_full,
                         levels=[1.0],
                         colors='purple',
                         linewidths=2.5,
                         linestyles='solid'
                     )
-                    self.drift_ax2.clabel(cs2_purple, inline=True, fmt='1%%', fontsize=11, 
-                                         colors='purple', inline_spacing=10,
-                                         manual=False)
-                
-                # 0.1% 线 - 黑色实线
+                    # 恢复 1% 标识
+                    self.drift_ax2.clabel(cs2_purple, inline=True, fmt='1%%', fontsize=11, colors='purple')
+                    
+                    # 绘制交点标注
+                    plot_intersection_labels(self.drift_ax2, cs2_purple, 'purple', limit_radius)
+
+                # 0.1% 线
                 if g_max_val >= 0.1:
                     cs2_black = self.drift_ax2.contour(
-                        x_sub, y_sub, G_percent,
+                        x_full, y_full, G_full,
                         levels=[0.1],
                         colors='black',
                         linewidths=2.0,
                         linestyles='solid'
                     )
-                    self.drift_ax2.clabel(cs2_black, inline=True, fmt='0.1%%', fontsize=11, 
-                                         colors='black', inline_spacing=10,
-                                         manual=False)
-            except: pass
-            
-            # 3. 设置显示范围为非转基因区域（Zoom in）
-            radius = float(self.non_gm_radius)
-            self.drift_ax2.set_xlim(-radius, radius)
-            self.drift_ax2.set_ylim(-radius, radius)
-            self.drift_ax2.set_aspect('equal', adjustable='box')
-            
-            self.drift_ax2.set_xlabel("相对 X 坐标 (m)")
-            self.drift_ax2.set_title(f"热力图 + 地图背景")
-            
-            # --- 右上：平均值统计图 (Ax3) ---
-            # X轴为相对位置，Y轴为该X处的平均漂移概率
-            # 获取 X 轴坐标 (取第一行)
-            x_axis = x_sub[0, :]
-            # 对每一列求平均 (axis=0)
-            y_avg = np.mean(G_percent, axis=0)
-            
-            self.drift_ax3.plot(x_axis, y_avg, color='blue', linewidth=2)
-            self.drift_ax3.set_title("平均漂移概率分布")
-            self.drift_ax3.set_xlabel("相对 X 坐标 (m)")
-            self.drift_ax3.set_ylabel("平均概率 (%)")
-            self.drift_ax3.grid(True, linestyle='--', alpha=0.7)
-            # 标出最大值点
-            max_idx = np.argmax(y_avg)
-            self.drift_ax3.plot(x_axis[max_idx], y_avg[max_idx], 'ro')
-            self.drift_ax3.text(x_axis[max_idx], y_avg[max_idx], f"{y_avg[max_idx]:.2f}%", 
-                               fontsize=9, verticalalignment='bottom')
+                    # 恢复 0.1% 标识
+                    self.drift_ax2.clabel(cs2_black, inline=True, fmt='0.1%%', fontsize=11, colors='black')
+                    
+                    # 绘制交点标注
+                    plot_intersection_labels(self.drift_ax2, cs2_black, 'black', limit_radius)
+                    
+            except Exception as e:
+                print(f"[WARN] 绘制局部轮廓失败: {e}")
 
-            # --- 右下：总和统计图 (Ax4) ---
-            # X轴为相对位置，Y轴为该X处的概率总和
-            y_sum = np.sum(G_percent, axis=0)
+
+            # === 图3：平均漂移概率分布 (Ax3) ===
+            # 需要提取 Non-GM 区域内的数据进行统计
+            # 找到 Non-GM 区域内的索引
+            radius_non = float(self.non_gm_radius)
+            # 假设 x_full, y_full 是 meshgrid，中心在 (0,0) (Non-GM center)
+            # 提取 [-radius, radius] 范围内的数据
             
-            self.drift_ax4.plot(x_axis, y_sum, color='green', linewidth=2)
-            self.drift_ax4.set_title("漂移概率总和分布")
-            self.drift_ax4.set_xlabel("相对 X 坐标 (m)")
-            self.drift_ax4.set_ylabel("概率总和 (%)")
-            self.drift_ax4.grid(True, linestyle='--', alpha=0.7)
-             # 标出最大值点
-            sum_max_idx = np.argmax(y_sum)
-            self.drift_ax4.plot(x_axis[sum_max_idx], y_sum[sum_max_idx], 'ro')
-            self.drift_ax4.text(x_axis[sum_max_idx], y_sum[sum_max_idx], f"{y_sum[sum_max_idx]:.1f}%", 
-                               fontsize=9, verticalalignment='bottom')
+            # 注意：x_full[0, :] 是 X 轴坐标
+            x_axis_full = x_full[0, :]
+            y_axis_full = y_full[:, 0]
             
-            # 添加颜色条 (水平放置在左侧两热力图下方)
+            x_mask = (x_axis_full >= -radius_non) & (x_axis_full <= radius_non)
+            y_mask = (y_axis_full >= -radius_non) & (y_axis_full <= radius_non)
+            
+            if np.any(x_mask) and np.any(y_mask):
+                # 提取子网格 G
+                G_sub = G_full[np.ix_(y_mask, x_mask)]
+                x_sub_axis = x_axis_full[x_mask]
+                
+                # 计算平均值 (沿 Y 轴平均)
+                y_avg = np.mean(G_sub, axis=0)
+                
+                self.drift_ax3.plot(x_sub_axis, y_avg, color='blue', linewidth=2)
+                self.drift_ax3.set_title(f"非转基因区域内平均漂移概率")
+                self.drift_ax3.set_xlabel("相对 X 坐标 (m)")
+                self.drift_ax3.set_ylabel("平均概率 (%)")
+                self.drift_ax3.grid(True, linestyle='--', alpha=0.7)
+                
+                # 标出最大值
+                if len(y_avg) > 0:
+                    max_idx = np.argmax(y_avg)
+                    self.drift_ax3.plot(x_sub_axis[max_idx], y_avg[max_idx], 'ro')
+                    self.drift_ax3.text(x_sub_axis[max_idx], y_avg[max_idx], f"{y_avg[max_idx]:.2f}%", 
+                                       fontsize=9, verticalalignment='bottom')
+            else:
+                self.drift_ax3.text(0.5, 0.5, "区域太小无法统计", ha='center', va='center')
+
+
+            # === 计算安全距离 (显示在 Ax4 位置) ===
+            # 安全距离：漂移概率 <= 0.1% 的最小距离
+            # 计算逻辑：找到所有 G >= 0.1% 的点，计算它们到 GM 区域边缘的距离，取最大值作为安全距离
+            
+            # 1. 确定 GM 区域位置 (相对于 (0,0) Non-GM)
+            # 需要 gm_offset_x, gm_offset_y
+            # 我们可以从 latest_model_data['params'] 中尝试恢复，或者重新计算
+            gm_center = self.latest_model_data['params'].get('gm_center')
+            non_gm_center = self.latest_model_data['params'].get('non_gm_center')
+            gm_radius = self.latest_model_data['params'].get('gm_radius', 50.0)
+            
+            safety_dist_str = "无法计算 (缺失位置信息)"
+            
+            if gm_center and non_gm_center:
+                # 计算 GM 相对于 Non-GM 的偏移 (同 ModelRunnerThread)
+                import math
+                gm_lat = float(gm_center.get('lat', 0.0))
+                meters_per_deg_lat = 111000.0
+                meters_per_deg_lng = 111000.0 * math.cos(math.radians(gm_lat))
+                
+                d_lng = float(gm_center['lng']) - float(non_gm_center['lng'])
+                d_lat = float(gm_center['lat']) - float(non_gm_center['lat'])
+                
+                gm_offset_x = d_lng * meters_per_deg_lng
+                gm_offset_y = d_lat * meters_per_deg_lat
+                
+                # 2. 计算每个网格点到 GM 边缘的距离
+                # dist = sqrt(dx^2 + dy^2), dx = max(0, abs(x - gm_x) - r), dy = max(0, abs(y - gm_y) - r)
+                # 使用 numpy 向量化计算
+                dx_grid = np.maximum(0, np.abs(x_full - gm_offset_x) - gm_radius)
+                dy_grid = np.maximum(0, np.abs(y_full - gm_offset_y) - gm_radius)
+                dist_grid = np.sqrt(dx_grid**2 + dy_grid**2)
+                
+                # 3. 筛选 G >= 0.1% 的点
+                mask_risk = G_full >= 0.1
+                
+                if np.any(mask_risk):
+                    max_risk_dist = np.max(dist_grid[mask_risk])
+                    # 安全距离 = 风险区域的最大距离
+                    # 向上取整到整数
+                    safety_distance = math.ceil(max_risk_dist)
+                    safety_dist_str = f"{safety_distance} m"
+                else:
+                    safety_dist_str = "0 m (全域安全)"
+            
+            # 显示文本
+            self.drift_ax4.text(0.5, 0.6, "基因漂移概率\n安全距离 (0.1%阈值)", 
+                               ha='center', va='center', fontsize=12, fontweight='bold', color='#333')
+            self.drift_ax4.text(0.5, 0.3, safety_dist_str, 
+                               ha='center', va='center', fontsize=24, fontweight='bold', color='green')
+
+
+            # 添加颜色条 (共用，对应花粉浓度)
             if hasattr(self, 'drift_cbar') and self.drift_cbar:
-                try:
-                    self.drift_cbar.remove()
-                except:
-                    pass
+                try: self.drift_cbar.remove()
+                except: pass
             
-            # 放在 ax1 和 ax2 的下方，水平方向
+            # 放在 ax1 和 ax2 的下方
             self.drift_cbar = self.drift_fig.colorbar(im1, ax=[self.drift_ax1, self.drift_ax2], 
                                                     orientation='horizontal', 
                                                     fraction=0.08, pad=0.15, aspect=40)
@@ -2082,20 +2245,20 @@ class MonitorApp(QMainWindow):
             self.drift_canvas.draw()
 
             # 6) 摘要
-            g_max = float(np.max(G_percent))
-            g_avg = float(np.mean(G_percent))
+            g_max = float(np.max(G_full))
+            g_avg = float(np.mean(G_full)) # 全局平均
             self.drift_result.setText(
-                f"热力图生成完成：区域大小 {radius*2:.0f}x{radius*2:.0f} m。区域内最大概率≈{g_max:.2f}%，平均概率≈{g_avg:.2f}%。"
+                f"热力图生成完成。区域内最大漂移概率≈{g_max:.2f}%。安全距离 (0.1%): {safety_dist_str}。"
             )
 
             if hasattr(self, 'drift_ready_label') and self.drift_ready_label:
-                self.drift_ready_label.setText("已基于最近模拟结果计算完成（热力图）")
+                self.drift_ready_label.setText("计算完成")
             
-            # 更新状态：计算完成
+            # 更新状态
             if hasattr(self, 'drift_status_indicator'):
                 self.drift_status_indicator.setStyleSheet("color: green; font-size: 20px;")
             if hasattr(self, 'drift_status_label'):
-                self.drift_status_label.setText("热力图计算完成")
+                self.drift_status_label.setText("计算完成")
                 self.drift_status_label.setStyleSheet("color: green; font-weight: bold;")
             
             self.loading_timer.stop()
