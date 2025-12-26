@@ -1,0 +1,31 @@
+
+        <!DOCTYPE html>
+        <html><head><meta charset='utf-8'><title>地图</title>
+        <style>html, body, #container {height: 100%; margin: 0;}</style>
+        <script type="text/javascript" src="https://api.map.baidu.com/api?v=3.0&ak=sXHZZmCrjOTisFCbeJnCFFNkUbfd4nF9"></script>
+        </head>
+        <body><div id="container"></div>
+        <script>
+        var map = new BMap.Map("container");
+        var point = new BMap.Point(116.404, 39.915);
+        map.centerAndZoom(point, 15);
+        map.enableScrollWheelZoom(true);
+        var centerMarker = new BMap.Marker(point);
+        map.addOverlay(centerMarker);
+    
+        // 通过经纬度输入定位地图中心，并更新中心标记
+        window.setMapCenter = function(lng, lat) {
+            try {
+                var p = new BMap.Point(lng, lat);
+                map.setCenter(p);
+                if (centerMarker) { try { map.removeOverlay(centerMarker); } catch(e){} }
+                centerMarker = new BMap.Marker(p);
+                map.addOverlay(centerMarker);
+                return true;
+            } catch (e) {
+                console.error("setMapCenter错误:", e);
+                return false;
+            }
+        }
+        </script></body></html>
+        

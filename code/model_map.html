@@ -1,0 +1,311 @@
+
+         <!DOCTYPE html>
+         <html>
+         <head>
+             <meta charset="utf-8">
+             <title>模型区域选择</title>
+             <style>
+                 html, body, #container { width: 100%; height: 100%; margin: 0; }
+                 #info { position: absolute; top: 10px; left: 10px; background: white; padding: 5px; z-index: 100; }
+                 #debug { position: absolute; bottom: 10px; left: 10px; right:10px; background: rgba(255,255,255,0.9); padding: 5px; z-index: 100; color: red; font-size:12px; }
+             </style>
+             <script type="text/javascript" src="https://api.map.baidu.com/api?v=3.0&ak=sXHZZmCrjOTisFCbeJnCFFNkUbfd4nF9"></script>
+         </head>
+         <body>
+             <div id="info">拖动地图到目标位置，点击"框选区域"按钮创建1km×1km范围</div>
+             <div id="debug">调试信息：未执行操作</div>
+             <div id="container"></div>
+             <script>
+                 var map = new BMap.Map("container");
+                 var centerPoint = new BMap.Point(116.404, 39.915); // 默认北京
+         
+                 function initMap() {
+                     try {
+                         map.centerAndZoom(centerPoint, 15);
+                         map.enableScrollWheelZoom(true);
+                         map.setMapStyleV2({styleId: "2b2e585dec698fa62f732b976f0ea1ac"});
+                         document.getElementById("debug").textContent = "地图初始化成功，已应用干净样式";
+                     } catch (e) {
+                         document.getElementById("debug").textContent = "地图初始化失败: " + e.message;
+                         console.error("地图初始化错误:", e);
+                     }
+                 }
+                 initMap();
+         
+                 // 1km 对应的经度/纬度近似度数
+                 var km1InDegree = 1.0 / 111.0;
+                 var mainRectangle = null;  // 重命名避免与种植区域矩形冲突
+                 var centerMarker = null;
+                 var currentCenter = centerPoint;
+                 
+                 // 初始化种植区域矩形变量
+                 window._gmRectangle = null;
+                 window._nonGmRectangle = null;
+                 console.log('种植区域矩形变量已初始化');
+         
+                 function calculateRectangle(center) {
+                     var lat = center.lat;
+                     var lng = center.lng;
+                     var lngAdjust = km1InDegree / Math.cos(lat * Math.PI / 180);
+                     var p1 = new BMap.Point(lng - lngAdjust/2, lat + km1InDegree/2);
+                     var p2 = new BMap.Point(lng + lngAdjust/2, lat - km1InDegree/2);
+                     return new BMap.Bounds(p1, p2);
+                 }
+         
+                 function updateRectangle(center) {
+                     try {
+                         if (mainRectangle) map.removeOverlay(mainRectangle);
+                         if (centerMarker) map.removeOverlay(centerMarker);
+         
+                         centerMarker = new BMap.Marker(center);
+                         map.addOverlay(centerMarker);
+         
+                         var bounds = calculateRectangle(center);
+                         var sw = bounds.getSouthWest();
+                         var ne = bounds.getNorthEast();
+                         var nw = new BMap.Point(sw.lng, ne.lat);
+                         var se = new BMap.Point(ne.lng, sw.lat);
+                         mainRectangle = new BMap.Polygon([
+                             sw,
+                             nw,
+                             ne,
+                             se
+                         ], {strokeColor:"blue", strokeWeight:2, strokeOpacity:0.8, fillOpacity:0.1});
+                         map.addOverlay(mainRectangle);
+                         currentCenter = center;
+                         map.setViewport(bounds);
+         
+                         document.getElementById("debug").textContent =
+                             "区域创建成功: " + center.lng.toFixed(6) + ", " + center.lat.toFixed(6);
+                         return center;
+                     } catch (e) {
+                         document.getElementById("debug").textContent = "区域创建失败: " + e.message;
+                         console.error("区域创建错误:", e);
+                         return null;
+                     }
+                 }
+         
+                 // 返回纯 JSON（number），保证 PyQt 能序列化
+                 window.createRectangleAtCenter = function() {
+                     try {
+                         var center = map.getCenter();
+                         if (!center) {
+                             throw new Error("无法获取地图中心");
+                         }
+                         updateRectangle(center);
+                         var result = {lng: parseFloat(center.lng), lat: parseFloat(center.lat)};
+                         console.log("返回中心坐标(JSON):", result);
+                         document.getElementById("debug").textContent =
+                             "返回中心坐标(JSON): " + result.lng.toFixed(6) + ", " + result.lat.toFixed(6);
+                         return result;
+                     } catch (e) {
+                         document.getElementById("debug").textContent = "createRectangleAtCenter错误: " + e.message;
+                         console.error("createRectangleAtCenter错误:", e);
+                         return null;
+                     }
+                 }
+         
+                 window.getModelAreaCenter = function() {
+                     var center = map.getCenter();
+                     updateRectangle(center);
+                     var result = {lng: parseFloat(center.lng), lat: parseFloat(center.lat)};
+                     return result;
+                 }
+         
+                 /* ------- 新增：通过输入定位地图中心 ------- */
+                 window.setMapCenter = function(lng, lat) {
+                     try {
+                         var point = new BMap.Point(lng, lat);
+                         map.setCenter(point);
+                         updateRectangle(point); // 更新矩形
+                         document.getElementById("debug").textContent = "已通过输入定位到: " + lng.toFixed(6) + ", " + lat.toFixed(6);
+                         return true;
+                     } catch (e) {
+                         document.getElementById("debug").textContent = "setMapCenter错误: " + e.message;
+                         console.error("setMapCenter错误:", e);
+                         return false;
+                     }
+                 }
+         
+                 /* ------- 自定义图片覆盖物（根据经纬度矩形定位） ------- */
+                 function ImageOverlay(bounds, imageUrl) {
+                     this._bounds = bounds; // {sw: {lng,lat}, ne: {lng,lat}}
+                     this._imageUrl = imageUrl;
+                 }
+                 ImageOverlay.prototype = new BMap.Overlay();
+                 ImageOverlay.prototype.initialize = function(map) {
+                     this._map = map;
+                     var div = document.createElement("div");
+                     div.style.position = "absolute";
+                     div.style.pointerEvents = "none";
+                     var img = document.createElement("img");
+                     img.src = this._imageUrl;
+                     img.style.position = "absolute";
+                     img.style.left = "0px";
+                     img.style.top = "0px";
+                     img.style.width = "100%";
+                     img.style.height = "100%";
+                     img.style.opacity = "0.85";
+                     div.appendChild(img);
+                     this._div = div;
+                     map.getPanes().floatPane.appendChild(div);
+                     return div;
+                 };
+                 ImageOverlay.prototype.draw = function() {
+                     var sw = new BMap.Point(this._bounds.sw.lng, this._bounds.sw.lat);
+                     var ne = new BMap.Point(this._bounds.ne.lng, this._bounds.ne.lat);
+                     var swPixel = this._map.pointToOverlayPixel(sw);
+                     var nePixel = this._map.pointToOverlayPixel(ne);
+                     var left = Math.min(swPixel.x, nePixel.x);
+                     var top = Math.min(swPixel.y, nePixel.y);
+                     var width = Math.abs(nePixel.x - swPixel.x);
+                     var height = Math.abs(nePixel.y - swPixel.y);
+                     this._div.style.left = left + "px";
+                     this._div.style.top = top + "px";
+                     this._div.style.width = width + "px";
+                     this._div.style.height = height + "px";
+                 };
+         
+                 // 将图片按给定经纬度矩形加载到地图
+                 window.addModelImageOverlay = function(imageUrl, sw, ne) {
+                     try {
+                         if (window._modelImageOverlay) {
+                             try { map.removeOverlay(window._modelImageOverlay); } catch(e){}
+                             window._modelImageOverlay = null;
+                         }
+                         var bounds = { sw: {lng: sw.lng, lat: sw.lat}, ne: {lng: ne.lng, lat: ne.lat} };
+                         window._modelImageOverlay = new ImageOverlay(bounds, imageUrl);
+                         map.addOverlay(window._modelImageOverlay);
+                         document.getElementById("debug").textContent = "已加载模型图片（大小与位置已对齐）";
+                         return true;
+                     } catch (e) {
+                         document.getElementById("debug").textContent = "addModelImageOverlay错误: " + e.message;
+                         console.error("addModelImageOverlay错误:", e);
+                         return false;
+                     }
+                 }
+
+                 // ===== 选择逻辑：支持左键点击为主，右键为辅；容器像素坐标作为兜底 =====
+                 // 禁用默认右键菜单，避免拦截地图事件
+                 document.addEventListener('contextmenu', function(ev){ ev.preventDefault(); return false; });
+                 
+                 // 选择状态与接口
+                 window._selectionMode = null; // 'gm' 或 'non_gm'
+                 window._selectionRadius = 50.0;
+                 window._gmSelection = null;
+                 window._nonGmSelection = null;
+
+                 window.setSelectionRadius = function(r){
+                     try { window._selectionRadius = (typeof r === 'number' && r > 0) ? r : 50.0; return true; } catch(e){ return false; }
+                 };
+                 
+                 window.setSelectionMode = function(mode){
+                     window._selectionMode = mode;
+                     var modeName = (mode === 'gm') ? '转基因区域(红)' : ((mode === 'non_gm') ? '非转基因区域(蓝)' : '无');
+                     document.getElementById('debug').textContent = '当前框选模式: ' + modeName + '。请在地图上右键框选。';
+                 };
+
+                 window.resetSelection = function(){
+                     try {
+                         window._selectionMode = null;
+                         window._gmSelection = null;
+                         window._nonGmSelection = null;
+                         if (window._gmRectangle) { try { map.removeOverlay(window._gmRectangle); } catch(e){} window._gmRectangle = null; }
+                         if (window._nonGmRectangle) { try { map.removeOverlay(window._nonGmRectangle); } catch(e){} window._nonGmRectangle = null; }
+                         document.getElementById('debug').textContent = '已重置选择。请点击上方按钮激活框选模式。';
+                         return true;
+                     } catch(e){ return false; }
+                 };
+                 
+                 window.getSelectedAreas = function(){
+                     try {
+                         var gm = window._gmSelection ? {lng: parseFloat(window._gmSelection.lng), lat: parseFloat(window._gmSelection.lat), radius: parseFloat(window._gmSelection.radius)} : null;
+                         var non = window._nonGmSelection ? {lng: parseFloat(window._nonGmSelection.lng), lat: parseFloat(window._nonGmSelection.lat), radius: parseFloat(window._nonGmSelection.radius)} : null;
+                         return { gm: gm, non: non };
+                     } catch(e){ return { gm: null, non: null }; }
+                 };
+
+                 function createAreaRectangle(center, radius, color){
+                     var sideLength = radius * 2;
+                     var latOffset = sideLength / 111000.0;
+                     var lngOffset = sideLength / (111000.0 * Math.cos(center.lat * Math.PI / 180));
+                     var sw = new BMap.Point(center.lng - lngOffset/2, center.lat - latOffset/2);
+                     var ne = new BMap.Point(center.lng + lngOffset/2, center.lat + latOffset/2);
+                     var nw = new BMap.Point(sw.lng, ne.lat);
+                     var se = new BMap.Point(ne.lng, sw.lat);
+                     return new BMap.Polygon([sw, nw, ne, se], {
+                         strokeColor: color,
+                         strokeWeight: 4,
+                         strokeOpacity: 1.0,
+                         fillColor: color,
+                         fillOpacity: 0.35
+                     });
+                 }
+
+                 // 选择防抖
+                 window._selectionGuard = false;
+                 function performSelection(center, source){
+                     try {
+                         if (window._selectionGuard) return;
+                         window._selectionGuard = true;
+                         setTimeout(function(){ window._selectionGuard = false; }, 200);
+                         
+                         if (!window._selectionMode) {
+                             document.getElementById('debug').textContent = '请先点击上方按钮激活框选模式！';
+                             return;
+                         }
+
+                         var r = window._selectionRadius || 500.0;
+                         
+                         if (window._selectionMode === 'gm') {
+                             if (window._gmRectangle) { try { map.removeOverlay(window._gmRectangle); } catch(ex){} window._gmRectangle = null; }
+                             var rect = createAreaRectangle(center, r, 'red');
+                             map.addOverlay(rect);
+                             window._gmRectangle = rect;
+                             window._gmSelection = { lng: parseFloat(center.lng), lat: parseFloat(center.lat), radius: parseFloat(r) };
+                             document.getElementById('debug').textContent = '已更新转基因区域（红）。';
+                         } else if (window._selectionMode === 'non_gm') {
+                             if (window._nonGmRectangle) { try { map.removeOverlay(window._nonGmRectangle); } catch(ex){} window._nonGmRectangle = null; }
+                             var rect2 = createAreaRectangle(center, r, 'blue');
+                             map.addOverlay(rect2);
+                             window._nonGmRectangle = rect2;
+                             window._nonGmSelection = { lng: parseFloat(center.lng), lat: parseFloat(center.lat), radius: parseFloat(r) };
+                             document.getElementById('debug').textContent = '已更新非转基因区域（蓝）。';
+                         }
+                     } catch(err) {
+                         document.getElementById('debug').textContent = '选择失败: ' + err.message;
+                     }
+                 }
+
+                 // 显式开启地图点击事件
+                 if (map.enableMapClick) { map.enableMapClick(true); }
+                 
+                 if (map.addEventListener) {
+                     // 统一使用右键
+                     map.addEventListener('rightclick', function(e){
+                         try {
+                             var center = e && e.point ? e.point : map.getCenter();
+                             performSelection(center, 'rightclick');
+                         } catch(err) {
+                             document.getElementById('debug').textContent = '地图rightclick选择失败: ' + err.message;
+                         }
+                     });
+                 }
+
+                 // 容器层点击作为后备
+                 (function(){
+                     var containerEl = document.getElementById('container');
+                     function selectAtPixel(ev){
+                         try {
+                             return; // 暂禁用容器点击，避免冲突
+                         } catch(err) {
+                             document.getElementById('debug').textContent = '容器click选择失败: ' + err.message;
+                         }
+                     }
+                     containerEl.addEventListener('click', function(ev){ selectAtPixel(ev); });
+                     containerEl.addEventListener('contextmenu', function(ev){ ev.preventDefault(); selectAtPixel(ev); });
+                 })();
+             </script>
+         </body>
+         </html>
+         
