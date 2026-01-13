@@ -99,49 +99,84 @@ def run_gaussian_model(wind_speed_value=5.0, wind_dir_value=10.0,
     print(f"[DEBUG] 叠加 {len(times)} 个时间步, 源点数量={stacks}")
     sys.stdout.flush()
     
-    # 并行计算优化：仅在源点数量较多时启用（避免小任务的进程创建开销）
-    use_parallel = stacks > 10  # 阈值：10个源点以上才使用并行
-    
-    if use_parallel:
-        try:
-            # 准备每个时间步的参数
-            args_list = [
-                (i, wind_dir_seq[i], Q, xs, ys, H, wind_speed_value, x, y, z, kp, L, Dy, Dz, STABILITY)
-                for i in range(len(times))
-            ]
-            
-            # 使用进程池并行计算
-            num_workers = min(cpu_count(), len(times))
-            print(f"[DEBUG] 使用并行计算: {num_workers} 个工作进程")
-            sys.stdout.flush()
-            
-            with Pool(processes=num_workers) as pool:
-                results = pool.map(compute_time_step_worker, args_list)
-            
-            # 收集结果
-            for i, C_time in results:
-                C1[:, :, i] = C_time
-                
-            print("[DEBUG] 并行计算完成")
-            sys.stdout.flush()
-            
-        except Exception as e:
-            print(f"[WARNING] 并行计算失败，回退到串行计算: {e}")
-            sys.stdout.flush()
-            use_parallel = False
-    
-    # 串行计算（回退或小任务）
-    if not use_parallel:
-        print("[DEBUG] 使用串行计算")
-        sys.stdout.flush()
-        for i in range(len(times)):
-            for j in range(stacks):
-                C = gauss_func(Q[j], wind_speed_value, wind_dir_seq[i],
-                               x, y, z, xs[j], ys[j], H[j], kp, L, Dy, Dz, STABILITY)
-                C1[:, :, i] += C
+    # --- PyTorch GPU 加速判断 ---
+    use_torch = False
+    try:
+        import torch
+        if torch.cuda.is_available():
+            from torch_gaussian_model import run_gaussian_model_torch
+            use_torch = True
+    except ImportError:
+        pass
 
-    # 累加得到C_donor
-    C_donor = np.sum(C1, axis=2)
+    if use_torch:
+        print("[DEBUG] 使用 PyTorch GPU 加速计算")
+        sys.stdout.flush()
+        try:
+            # 调用 PyTorch 版本
+            x_gpu, y_gpu, C_donor_gpu, _ = run_gaussian_model_torch(
+                wind_speed_value=wind_speed_value,
+                wind_dir_value=wind_dir_value,
+                grid_km=grid_km, dxy=dxy,
+                source_radius=source_radius,
+                gm_offset_x=gm_offset_x,
+                gm_offset_y=gm_offset_y,
+                wind_mode=wind_mode,
+                temperature_value=temperature_value,
+                humidity_value=humidity_value,
+                pollen_factor=pollen_factor,
+                height_diff=height_diff
+            )
+            C_donor = C_donor_gpu
+            # grid x, y 已经在之前生成了，直接使用即可 (或者使用返回的对齐后的)
+        except Exception as e:
+            print(f"[WARNING] PyTorch 加速失败，回退到原始模型: {e}")
+            use_torch = False
+
+    if not use_torch:
+        # 并行计算优化：仅在源点数量较多时启用（避免小任务的进程创建开销）
+        use_parallel = stacks > 10  # 阈值：10个源点以上才使用并行
+        
+        if use_parallel:
+            try:
+                # 准备每个时间步的参数
+                args_list = [
+                    (i, wind_dir_seq[i], Q, xs, ys, H, wind_speed_value, x, y, z, kp, L, Dy, Dz, STABILITY)
+                    for i in range(len(times))
+                ]
+                
+                # 使用进程池并行计算
+                num_workers = min(cpu_count(), len(times))
+                print(f"[DEBUG] 使用并行计算: {num_workers} 个工作进程")
+                sys.stdout.flush()
+                
+                with Pool(processes=num_workers) as pool:
+                    results = pool.map(compute_time_step_worker, args_list)
+                
+                # 收集结果
+                for i, C_time in results:
+                    C1[:, :, i] = C_time
+                    
+                print("[DEBUG] 并行计算完成")
+                sys.stdout.flush()
+                
+            except Exception as e:
+                print(f"[WARNING] 并行计算失败，回退到串行计算: {e}")
+                sys.stdout.flush()
+                use_parallel = False
+        
+        # 串行计算（回退或小任务）
+        if not use_parallel:
+            print("[DEBUG] 使用串行计算")
+            sys.stdout.flush()
+            for i in range(len(times)):
+                for j in range(stacks):
+                    C = gauss_func(Q[j], wind_speed_value, wind_dir_seq[i],
+                                x, y, z, xs[j], ys[j], H[j], kp, L, Dy, Dz, STABILITY)
+                    C1[:, :, i] += C
+
+        # 累加得到C_donor
+        C_donor = np.sum(C1, axis=2)
     mean_concentration_grain = C_donor
 
     # 保存矩形区域浓度矩阵到CSV（y反转）

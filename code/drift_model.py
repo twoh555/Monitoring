@@ -117,4 +117,11 @@ def calculate_drift_probability(
     
     G_percent = G * 100.0
     
+    # 4. 掩码：如果返回全网格，将非转基因区域外的概率设为 0 (因为漂移只在受体田块内有意义)
+    if return_full_grid:
+        radius = float(non_gm_radius)
+        # 正方形区域掩码
+        mask = (np.abs(x_sub) > radius) | (np.abs(y_sub) > radius)
+        G_percent[mask] = 0.0
+    
     return x_sub, y_sub, G_percent

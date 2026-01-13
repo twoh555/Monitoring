@@ -282,35 +282,44 @@ class MonitorApp(QMainWindow):
                     return base_r / denominator
 
                 if mode_idx == 0:
-                    # Tab 1: 直角坐标
+                    # Tab 1: 直角坐标 (支持中心/边界混合模式)
                     try:
                         in_x = float(self.offset_e_input.text())
                         in_y = float(self.offset_n_input.text())
                         
-                        # 1. 计算Gap的大小和方向
-                        gap_dist = math.sqrt(in_x**2 + in_y**2)
-                        
-                        if gap_dist < 1e-6:
-                            angle_rad = 0.0
-                            d_x, d_y = 0.0, 0.0
-                            center_dist = 0.0
-                            description = "重叠"
+                        # 1. 计算 X 方向中心位移 (d_x)
+                        if self.btn_mode_e.isChecked():
+                            # 边界模式
+                            if in_x > 0: d_x = r_gm + r_non + in_x
+                            elif in_x < 0: d_x = -(r_gm + r_non + abs(in_x))
+                            else: d_x = 0.0
                         else:
-                            # 计算方向 (0=North, Clockwise) -> atan2(x, y)
-                            angle_rad = math.atan2(in_x, in_y)
+                            # 中心模式
+                            d_x = in_x
                             
-                            # 计算在此方向上两个正方形的有效半径
-                            eff_r_gm = get_square_effective_radius(r_gm, angle_rad)
-                            eff_r_non = get_square_effective_radius(r_non, angle_rad)
+                        # 2. 计算 Y 方向中心位移 (d_y)
+                        if self.btn_mode_n.isChecked():
+                            # 边界模式
+                            if in_y > 0: d_y = r_gm + r_non + in_y
+                            elif in_y < 0: d_y = -(r_gm + r_non + abs(in_y))
+                            else: d_y = 0.0
+                        else:
+                            # 中心模式
+                            d_y = in_y
                             
-                            # 中心距 = Gap + R1 + R2
-                            center_dist = gap_dist + eff_r_gm + eff_r_non
+                        # 3. 计算用于显示的统计信息
+                        center_dist = math.sqrt(d_x**2 + d_y**2)
+                        
+                        # 真实边界间距计算 (用于状态显示)
+                        gap_x = max(0.0, abs(d_x) - (r_gm + r_non))
+                        gap_y = max(0.0, abs(d_y) - (r_gm + r_non))
+                        if gap_x > 0 and gap_y > 0:
+                            gap_dist = math.sqrt(gap_x**2 + gap_y**2)
+                        else:
+                            gap_dist = max(gap_x, gap_y)
                             
-                            # 分解回 d_x, d_y (Center Offset)
-                            d_x = center_dist * math.sin(angle_rad)
-                            d_y = center_dist * math.cos(angle_rad)
-                            
-                        description = f"直角输入(Gap={gap_dist:.1f}m)"
+                        mode_str = f"X:{'边' if self.btn_mode_e.isChecked() else '中'}, Y:{'边' if self.btn_mode_n.isChecked() else '中'}"
+                        description = f"直角混合({mode_str}, E:{in_x:.1f}, N:{in_y:.1f})"
                             
                     except ValueError:
                         self.show_error_message("坐标输入错误")
@@ -895,18 +904,36 @@ class MonitorApp(QMainWindow):
         row_e = QHBoxLayout()
         row_e.addWidget(QLabel("向东+/西-(m):"))
         self.offset_e_input = QLineEdit("0")
-        self.offset_e_input.setPlaceholderText("负数=向西")
+        self.offset_e_input.setPlaceholderText("位移数值")
         self.offset_e_input.setFixedWidth(200)
         row_e.addWidget(self.offset_e_input)
+        
+        # 模式切换按钮 (E)
+        self.btn_mode_e = QPushButton("边界距离")
+        self.btn_mode_e.setCheckable(True)
+        self.btn_mode_e.setFixedWidth(80)
+        self.btn_mode_e.setToolTip("开启代表相对于转基因区域右/左边界计算，关闭代表中心位移")
+        self.btn_mode_e.toggled.connect(lambda checked: self.btn_mode_e.setText("边界" if checked else "中心"))
+        self.btn_mode_e.setChecked(True) # 默认边界
+        row_e.addWidget(self.btn_mode_e)
         row_e.addStretch()
         vbox_xy.addLayout(row_e)
         
         row_n = QHBoxLayout()
         row_n.addWidget(QLabel("向北+/南-(m):"))
         self.offset_n_input = QLineEdit("-50")
-        self.offset_n_input.setPlaceholderText("负数=向南")
+        self.offset_n_input.setPlaceholderText("位移数值")
         self.offset_n_input.setFixedWidth(200)
         row_n.addWidget(self.offset_n_input)
+        
+        # 模式切换按钮 (N)
+        self.btn_mode_n = QPushButton("边界距离")
+        self.btn_mode_n.setCheckable(True)
+        self.btn_mode_n.setFixedWidth(80)
+        self.btn_mode_n.setToolTip("开启代表相对于转基因区域上/下边界计算，关闭代表中心位移")
+        self.btn_mode_n.toggled.connect(lambda checked: self.btn_mode_n.setText("边界" if checked else "中心"))
+        self.btn_mode_n.setChecked(True) # 默认边界
+        row_n.addWidget(self.btn_mode_n)
         row_n.addStretch()
         vbox_xy.addLayout(row_n)
         
@@ -1937,7 +1964,7 @@ class MonitorApp(QMainWindow):
             extent_full = [x_full.min(), x_full.max(), y_full.min(), y_full.max()]
             
             # === 图1：基因漂移概率分布 + 地图底图 (全局视图) ===
-            self.drift_ax1.set_title("基因漂移概率分布 (地图叠加)")
+            self.drift_ax1.set_title("基因漂移概率分布 (地图叠加)", pad=25)
             
             # 1. 绘制底图
             if basemap_path and os.path.exists(basemap_path):
@@ -1981,18 +2008,43 @@ class MonitorApp(QMainWindow):
             except Exception as e:
                 print(f"[WARN] 绘制轮廓失败: {e}")
 
-            # 4. 在全局图中框出非转基因区域
+            # 4. 获取位置参数以绘制种植区域
+            gm_center = self.latest_model_data['params'].get('gm_center')
+            non_gm_center = self.latest_model_data['params'].get('non_gm_center')
+            gm_radius = self.latest_model_data['params'].get('gm_radius', 50.0)
+            non_gm_radius = self.latest_model_data['params'].get('non_gm_radius', 50.0)
+            
+            gm_off_x, gm_off_y = 0.0, 0.0
+            if gm_center and non_gm_center:
+                import math
+                gm_lat = float(gm_center.get('lat', 0.0))
+                meters_per_deg_lat = 111000.0
+                meters_per_deg_lng = 111000.0 * math.cos(math.radians(gm_lat))
+                d_lng = float(gm_center['lng']) - float(non_gm_center['lng'])
+                d_lat = float(gm_center['lat']) - float(non_gm_center['lat'])
+                gm_off_x = d_lng * meters_per_deg_lng
+                gm_off_y = d_lat * meters_per_deg_lat
+
+            # 5. 在全局图中框出种植区域
             try:
-                # 假设 Non-GM 中心在 (0,0) (相对坐标)
-                # 实际上 x_full, y_full 已经是相对坐标了
+                # 绘制非转基因区域 (蓝色)
                 non_gm_rect_global = plt.Rectangle(
-                    (-self.non_gm_radius, -self.non_gm_radius), 
-                    self.non_gm_radius*2, self.non_gm_radius*2,
+                    (-non_gm_radius, -non_gm_radius), 
+                    non_gm_radius*2, non_gm_radius*2,
                     fill=False, color='blue', linewidth=2, linestyle='--', label='Non-GM'
                 )
                 self.drift_ax1.add_patch(non_gm_rect_global)
+                
+                # 绘制转基因区域 (红色)
+                gm_rect_global = plt.Rectangle(
+                    (gm_off_x - gm_radius, gm_off_y - gm_radius), 
+                    gm_radius*2, gm_radius*2,
+                    fill=False, color='red', linewidth=2, linestyle='--', label='GM Source'
+                )
+                self.drift_ax1.add_patch(gm_rect_global)
+                
             except Exception as e:
-                print(f"[WARN] 绘制非转基因框失败: {e}")
+                print(f"[WARN] 绘制种植区域框失败: {e}")
 
             self.drift_ax1.set_xlabel("X (m)")
             self.drift_ax1.set_ylabel("Y (m)")
@@ -2000,7 +2052,7 @@ class MonitorApp(QMainWindow):
 
 
             # === 图2：基因漂移概率分布 + 轮廓 (局部视图 - 仅非转基因区域) ===
-            self.drift_ax2.set_title("基因漂移概率分布 (非转基因区域)")
+            self.drift_ax2.set_title("基因漂移概率分布 (非转基因区域)", pad=25)
             
             # 设置显示范围为非转基因区域大小
             limit_radius = float(self.non_gm_radius)
@@ -2077,32 +2129,40 @@ class MonitorApp(QMainWindow):
                 top_ints = find_line_intersections(paths, 'y', radius)
                 for (ix, iy) in top_ints:
                     if -radius <= ix <= radius:
+                        # 1% (purple) 放在外侧，0.1% (black) 放在内侧
+                        v_align = 'bottom' if color == 'purple' else 'top'
                         ax.text(ix, iy, f"{ix:.1f}m", color=color, fontsize=10, fontweight='bold',
-                                ha='center', va='bottom') # 文字在框外上方或刚好压线
+                                ha='center', va=v_align)
                         ax.plot(ix, iy, 'o', color=color, markersize=4)
 
                 # 4. 与 右侧边框 (x=radius) 的交点
                 right_ints = find_line_intersections(paths, 'x', radius)
                 for (ix, iy) in right_ints:
                     if -radius <= iy <= radius:
+                        # 1% (purple) 放在外侧，0.1% (black) 放在内侧
+                        h_align = 'left' if color == 'purple' else 'right'
                         ax.text(ix, iy, f"{iy:.1f}m", color=color, fontsize=10, fontweight='bold',
-                                ha='left', va='center')
+                                ha=h_align, va='center')
                         ax.plot(ix, iy, 'o', color=color, markersize=4)
                         
                 # 5. 与 底部边框 (y=-radius) 的交点
                 bottom_ints = find_line_intersections(paths, 'y', -radius)
                 for (ix, iy) in bottom_ints:
                     if -radius <= ix <= radius:
+                        # 1% (purple) 放在外侧，0.1% (black) 放在内侧
+                        v_align = 'top' if color == 'purple' else 'bottom'
                         ax.text(ix, iy, f"{ix:.1f}m", color=color, fontsize=10, fontweight='bold',
-                                ha='center', va='top')
+                                ha='center', va=v_align)
                         ax.plot(ix, iy, 'o', color=color, markersize=4)
 
                 # 6. 与 左侧边框 (x=-radius) 的交点
                 left_ints = find_line_intersections(paths, 'x', -radius)
                 for (ix, iy) in left_ints:
                     if -radius <= iy <= radius:
+                        # 1% (purple) 放在外侧，0.1% (black) 放在内侧
+                        h_align = 'right' if color == 'purple' else 'left'
                         ax.text(ix, iy, f"{iy:.1f}m", color=color, fontsize=10, fontweight='bold',
-                                ha='right', va='center')
+                                ha=h_align, va='center')
                         ax.plot(ix, iy, 'o', color=color, markersize=4)
 
             # 2. 绘制轮廓并标注
@@ -2183,33 +2243,14 @@ class MonitorApp(QMainWindow):
             # 安全距离：漂移概率 <= 0.1% 的最小距离
             # 计算逻辑：找到所有 G >= 0.1% 的点，计算它们到 GM 区域边缘的距离，取最大值作为安全距离
             
-            # 1. 确定 GM 区域位置 (相对于 (0,0) Non-GM)
-            # 需要 gm_offset_x, gm_offset_y
-            # 我们可以从 latest_model_data['params'] 中尝试恢复，或者重新计算
-            gm_center = self.latest_model_data['params'].get('gm_center')
-            non_gm_center = self.latest_model_data['params'].get('non_gm_center')
-            gm_radius = self.latest_model_data['params'].get('gm_radius', 50.0)
-            
             safety_dist_str = "无法计算 (缺失位置信息)"
             
             if gm_center and non_gm_center:
-                # 计算 GM 相对于 Non-GM 的偏移 (同 ModelRunnerThread)
-                import math
-                gm_lat = float(gm_center.get('lat', 0.0))
-                meters_per_deg_lat = 111000.0
-                meters_per_deg_lng = 111000.0 * math.cos(math.radians(gm_lat))
-                
-                d_lng = float(gm_center['lng']) - float(non_gm_center['lng'])
-                d_lat = float(gm_center['lat']) - float(non_gm_center['lat'])
-                
-                gm_offset_x = d_lng * meters_per_deg_lng
-                gm_offset_y = d_lat * meters_per_deg_lat
-                
-                # 2. 计算每个网格点到 GM 边缘的距离
+                # 2. 计算每个网格点到 GM 边缘的距离 (使用前面算好的 gm_off_x/y)
                 # dist = sqrt(dx^2 + dy^2), dx = max(0, abs(x - gm_x) - r), dy = max(0, abs(y - gm_y) - r)
                 # 使用 numpy 向量化计算
-                dx_grid = np.maximum(0, np.abs(x_full - gm_offset_x) - gm_radius)
-                dy_grid = np.maximum(0, np.abs(y_full - gm_offset_y) - gm_radius)
+                dx_grid = np.maximum(0, np.abs(x_full - gm_off_x) - gm_radius)
+                dy_grid = np.maximum(0, np.abs(y_full - gm_off_y) - gm_radius)
                 dist_grid = np.sqrt(dx_grid**2 + dy_grid**2)
                 
                 # 3. 筛选 G >= 0.1% 的点
