@@ -15,6 +15,8 @@ class ModelRunnerThread(QThread):
     """模型计算线程类"""
     # 定义完成信号：最终图片URL, 边界, 数据(x,y,conc), 透明覆盖层路径, 底图路径
     finished = pyqtSignal(str, dict, tuple, str, str)
+    # 错误信号
+    error_occurred = pyqtSignal(str)
     
     def __init__(self, center_lng, center_lat, wind_speed, wind_dir, 
                  calculate_bounds_func, source_radius=500.0, download_map_func=None, overlay_func=None,
@@ -161,10 +163,10 @@ class ModelRunnerThread(QThread):
             print("[模型线程] 计算完成")
             
         except Exception as e:
-            print(f"[模型线程] 错误: {str(e)}")
-            print(traceback.format_exc())
+            err_msg = f"模型计算出错: {str(e)}\n{traceback.format_exc()}"
+            print(f"[模型线程] {err_msg}")
+            self.error_occurred.emit(str(e))
             self.finished.emit("", {}, (None, None, None), "", "")
-
 
 class DriftCalculatorThread(QThread):
     """基因漂移概率计算线程"""
@@ -173,38 +175,41 @@ class DriftCalculatorThread(QThread):
     error = pyqtSignal(str)
 
     def __init__(self, x_full, y_full, conc_donor_full, non_gm_radius,
-                 kp, L, vd, cp, wind_speed, wind_dir, grid_km, dxy, pollen_factor):
+                 beta1, beta2, vd, cp, wind_speed, wind_dir, grid_km, dxy, 
+                 pollen_factor, Rd=0.50):
         super().__init__()
         self.x_full = x_full
         self.y_full = y_full
         self.conc_donor_full = conc_donor_full
         self.non_gm_radius = non_gm_radius
-        self.kp = kp
-        self.L = L
+        self.beta1 = beta1
+        self.beta2 = beta2
         self.vd = vd
         self.cp = cp
         self.wind_speed = wind_speed
         self.wind_dir = wind_dir
         self.grid_km = grid_km
         self.dxy = dxy
-        self.pollen_factor = pollen_factor
+        self.pollen_factor = pollen_factor  # 这里就是 Q_base
+        self.Rd = Rd                        # 新增 Rd
 
     def run(self):
         try:
             print("[漂移线程] 开始计算...")
             import drift_model
+            # 调用新的 drift_model 函数（去掉了 pollen_factor_recipient，加入了 Rd）
             x_sub, y_sub, G_percent = drift_model.calculate_drift_probability(
                 self.x_full, self.y_full, self.conc_donor_full,
                 self.non_gm_radius,
-                self.kp, self.L, self.vd, self.cp,
+                self.beta1, self.beta2, self.vd, self.cp,
                 self.wind_speed, self.wind_dir, self.grid_km,
                 dxy=self.dxy,
                 pollen_factor=self.pollen_factor,
-                return_full_grid=True  # 总是返回完整网格以便绘制全局图
+                Rd=self.Rd,
+                return_full_grid=True
             )
             print("[漂移线程] 计算完成")
             self.finished.emit(x_sub, y_sub, G_percent)
         except Exception as e:
             print(f"[漂移线程] 错误: {e}")
             self.error.emit(str(e))
-
