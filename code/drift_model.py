@@ -6,10 +6,11 @@ from gaussian_plume_model import run_gaussian_model
 def calculate_drift_probability(
     x_full, y_full, conc_donor_full,
     non_gm_radius,
-    kp, L, vd, cp,
+    beta1, beta2, vd, cp,
     wind_speed, wind_dir, grid_km,
     dxy=10.0,
     pollen_factor=5000000.0,
+    pollen_factor_recipient=4209000.0,
     return_full_grid=False
 ):
     """
@@ -31,7 +32,7 @@ def calculate_drift_probability(
     """
     
     print(f"[DriftModel] 开始计算基因漂移概率...")
-    print(f"[DriftModel] 参数: R={non_gm_radius}, kp={kp}, L={L}, vd={vd}, cp={cp}, Q_source={pollen_factor}")
+    print(f"[DriftModel] 参数: R={non_gm_radius}, beta1={beta1}, beta2={beta2}, vd={vd}, cp={cp}, Q_source={pollen_factor}")
     print(f"[DriftModel] 环境: Wind={wind_speed}m/s @ {wind_dir}deg")
     
     # 1. 计算受体自身花粉浓度 (Source at 0,0)
@@ -50,7 +51,7 @@ def calculate_drift_probability(
             wind_mode='constant',
             temperature_value=None,
             humidity_value=None,
-            pollen_factor=pollen_factor,  # 使用传入的源强
+            pollen_factor=pollen_factor_recipient,  # 使用传入的受体源强
             height_diff=3.0 # 受体通常假设高度差较小？或者保持一致。这里保持默认。
         )
     except Exception as e:
@@ -107,21 +108,30 @@ def calculate_drift_probability(
     print(f"TR (-1,-1) : x={x_sub[-1,-1]:.1f}, y={y_sub[-1,-1]:.1f}, Donor={conc_donor_sub[-1,-1]:.2e}")
     
     # 3. 计算 G
-    # 公式更新：D_recipient = exp(-kp*L)*Q + exp(-kp*L)*Conc_rec*vd
-    # 其中 Q 是供体源强 (pollen_factor)，而非受体的 Q_rec
-    decay = math.exp(-kp * L)
-    D_donor = decay * conc_donor_sub * vd
-    D_recipient = decay * pollen_factor + decay * conc_recipient_sub * vd
-    A = (cp / (1.0 - cp)) ** 2
-    G = (A * D_donor) / (A * D_donor + D_recipient + 1e-12)
-    
-    G_percent = G * 100.0
-    
+    # 公式更新：D_recipient = exp(-kp*L)*Q_rec + exp(-kp*L)*Conc_rec*vd
+    # 其中 Q_rec 是受体源强 (pollen_factor_recipient)
+    exp_b1 = math.exp(-beta1)
+    exp_b2 = math.exp(-beta2)
+    D_donor = exp_b1 * conc_donor_sub * vd
+    D_recipient = exp_b2 * pollen_factor_recipient + exp_b1 * conc_recipient_sub * vd
+    denominator = D_donor + D_recipient
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        x = np.where(denominator != 0, D_donor / (denominator + 1e-12), 0.0)
+
+    A = ((1.0 - cp) / cp) ** 2 if cp != 0 else 1e10
+
+    if abs(A - 1.0) < 1e-7:
+        # cp ≈ 0.5 时，A ≈ 1，极限形式
+        G = x
+    else:
+        G = (np.power(A, x) - 1.0) / (A - 1.0)
+
     # 4. 掩码：如果返回全网格，将非转基因区域外的概率设为 0 (因为漂移只在受体田块内有意义)
     if return_full_grid:
         radius = float(non_gm_radius)
         # 正方形区域掩码
         mask = (np.abs(x_sub) > radius) | (np.abs(y_sub) > radius)
-        G_percent[mask] = 0.0
+        G[mask] = 0.0
     
-    return x_sub, y_sub, G_percent
+    return x_sub, y_sub, G
