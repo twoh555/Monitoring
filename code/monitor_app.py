@@ -57,6 +57,10 @@ class MonitorApp(QMainWindow):
         self.loading_timer.timeout.connect(self.update_loading_animation)
         self.loading_dots = 0
         
+        
+        # 临时文件追踪（用于自动清理中间产物）
+        self.temp_files = []
+        
         # 种植区域相关属性
         self.gm_center = None  # 转基因种植区域中心坐标
         self.gm_radius = None  # 转基因种植区域半径
@@ -68,6 +72,20 @@ class MonitorApp(QMainWindow):
         self.wind_samples = deque()
         
         self.init_ui()
+
+    def _get_app_temp_dir(self):
+        base_dir = os.path.join(tempfile.gettempdir(), "MonitoringSystem")
+        os.makedirs(base_dir, exist_ok=True)
+        return base_dir
+
+    def _write_temp_html(self, filename, html_content):
+        temp_dir = self._get_app_temp_dir()
+        file_path = os.path.join(temp_dir, filename)
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        if file_path not in self.temp_files:
+            self.temp_files.append(file_path)
+        return file_path
 
     def update_loading_animation(self):
         self.loading_dots = (self.loading_dots + 1) % 4
@@ -94,7 +112,7 @@ class MonitorApp(QMainWindow):
     def init_ui(self):
         """初始化UI界面"""
         self.setWindowTitle("风速风向温湿度监测系统（含地图 + 模型计算）")
-        self.setGeometry(100, 100, 1000, 650)
+        self.setGeometry(100, 100, 1000, 1200)
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
@@ -178,11 +196,16 @@ class MonitorApp(QMainWindow):
         }
         </script></body></html>
         """
-        with open("temp_map.html", "w", encoding="utf-8") as f:
-            f.write(html_content)
-    
+
+        temp_map_path = None
+        try:
+            temp_map_path = self._write_temp_html("temp_map.html", html_content)
+        except Exception as e:
+            self.show_error_message(f"生成监测地图页面失败：{e}")
+
         self.map_view = QWebEngineView()
-        self.map_view.load(QUrl.fromLocalFile(os.path.abspath("temp_map.html")))
+        if temp_map_path:
+            self.map_view.load(QUrl.fromLocalFile(temp_map_path))
     
         self.data_group = QGroupBox("风速风向温湿度")
         data_layout = QGridLayout(self.data_group)
@@ -489,6 +512,35 @@ class MonitorApp(QMainWindow):
             self.show_error_message(f"导出失败: {e}")
             import traceback
             print(traceback.format_exc())
+
+    def cleanup_temp_files(self):
+        """清理追踪的临时文件"""
+        if not hasattr(self, 'temp_files') or not self.temp_files:
+            return
+            
+        print(f"[清理] 正在清理 {len(self.temp_files)} 个临时文件...")
+        for path in self.temp_files:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    print(f"[清理] 已删除: {os.path.basename(path)}")
+            except Exception as e:
+                print(f"[清理] 删除失败 {path}: {e}")
+        self.temp_files = []
+
+    def closeEvent(self, event):
+        """窗口关闭事件：清理临时文件并关闭线程"""
+        print("[退出] 正在关闭应用程序...")
+        # 1. 清理临时文件
+        self.cleanup_temp_files()
+        
+        # 2. 关闭线程
+        if hasattr(self, 'serial_thread') and self.serial_thread and self.serial_thread.running:
+            self.serial_thread.close()
+        if hasattr(self, 'hardware_serial_thread') and self.hardware_serial_thread and self.hardware_serial_thread.running:
+            self.hardware_serial_thread.close()
+            
+        event.accept()
 
     def setup_model_map(self):
         """设置模型地图，修复JS返回值并将默认框选改为 1km x 1km，同时提供 addModelImageOverlay 接口"""
@@ -836,16 +888,14 @@ class MonitorApp(QMainWindow):
          </html>
          """
 
+        model_map_path = None
         try:
-            with open("model_map.html", "w", encoding="utf-8") as f:
-                f.write(html_content)
-            print("地图HTML文件生成成功")
+            model_map_path = self._write_temp_html("model_map.html", html_content)
         except Exception as e:
-            print(f"生成地图HTML失败: {str(e)}")
+            self.show_error_message(f"生成模型地图页面失败：{e}")
 
-        self.model_map_view.load(QUrl.fromLocalFile(os.path.abspath("model_map.html")))
-
-
+        if model_map_path:
+            self.model_map_view.load(QUrl.fromLocalFile(model_map_path))
 
     def create_blank_tab(self):
         """创建实时记录标签页"""
@@ -1494,7 +1544,11 @@ class MonitorApp(QMainWindow):
             # 读取风场模式
             wind_mode_text = self.wind_mode_combo.currentText() if hasattr(self, 'wind_mode_combo') else '恒定风'
             wind_mode_key = 'prevailing' if wind_mode_text == '盛行风' else 'constant'
-
+            
+            # 启动模型前清理上一次的临时文件
+            self.cleanup_temp_files()
+            
+            # 启动模型线程
             self.model_thread = ModelRunnerThread(
                 center_lng, center_lat,
                 used_speed, used_dir,
@@ -1603,7 +1657,11 @@ class MonitorApp(QMainWindow):
 
             print("[DEBUG] 构造线程对象之后")
 
+            # 信号连接
             self.model_thread.finished.connect(self.on_model_finished)
+            self.model_thread.error_occurred.connect(self.on_model_error)
+            
+            # 开始
             self.model_thread.start()
 
         except Exception as e:
@@ -1637,6 +1695,17 @@ class MonitorApp(QMainWindow):
         }
         return {"sw": sw, "ne": ne}
     
+    def on_model_error(self, error_msg):
+        """处理模型线程报错"""
+        self.conversation_error_msg = error_msg # 保存错误信息供调试
+        QMessageBox.critical(self, "模拟失败", f"模型计算过程中发生严重错误：\n{error_msg}\n\n请检查：\n1. 显卡驱动是否正常\n2. 临时目录权限\n3. 内存是否充足")
+        self.model_status_label.setText("模拟出错！")
+        self.model_status_label.setStyleSheet("color: red; font-weight: bold;")
+        self.status_indicator.setStyleSheet("color: red;")
+        self.loading_timer.stop()
+        if hasattr(self, 'run_model_btn'):
+            self.run_model_btn.setEnabled(True)
+
     def on_model_finished(self, final_url, bounds, data, overlay_path, basemap_path):
         """模型计算完成后的回调处理"""
         self.loading_timer.stop()
@@ -1648,6 +1717,8 @@ class MonitorApp(QMainWindow):
                 self.status_indicator.setStyleSheet("color: red; font-size: 20px;")  # 指示灯保持红色
                 self.run_model_btn.setEnabled(True)
                 return
+
+
 
             # 右边绘制:使用相同的图片和数据
             # data tuple expanded: x, y, conc, recipient_data
@@ -1681,6 +1752,16 @@ class MonitorApp(QMainWindow):
                     "height_diff": getattr(self.model_thread, 'height_diff', 0)
                 }
             }
+            
+            # 追踪新产生的临时文件
+            for path in [overlay_path, basemap_path, final_url]:
+                if path:
+                    # 处理可能存在的 file:/// 前缀
+                    clean_path = path.replace("file:///", "").replace("file://", "")
+                    if os.path.isabs(clean_path) and os.path.exists(clean_path):
+                        if clean_path not in self.temp_files:
+                            self.temp_files.append(clean_path)
+                            print(f"[追踪] 临时文件: {os.path.basename(clean_path)}")
 
             # 左侧在线地图：叠加本次计算得到的透明覆盖层（随所选区域变化）
             try:
@@ -1722,18 +1803,18 @@ class MonitorApp(QMainWindow):
 
         # 顶部：参数与按钮
         h_top = QHBoxLayout()
-        h_top.addWidget(QLabel("冠层拦截系数 k_p:"))
-        self.kp_input = QLineEdit()
-        self.kp_input.setFixedWidth(80)
-        self.kp_input.setText("0.3")
-        h_top.addWidget(self.kp_input)
+        h_top.addWidget(QLabel("供体衰减系数 beta1:"))
+        self.beta1_input = QLineEdit()
+        self.beta1_input.setFixedWidth(80)
+        self.beta1_input.setText("1.5")        
+        h_top.addWidget(self.beta1_input)
 
         h_top.addSpacing(8)
-        h_top.addWidget(QLabel("叶面积指数 L:"))
-        self.L_input = QLineEdit()
-        self.L_input.setFixedWidth(80)
-        self.L_input.setText("2.0")
-        h_top.addWidget(self.L_input)
+        h_top.addWidget(QLabel("受体衰减系数 beta2:"))
+        self.beta2_input = QLineEdit()
+        self.beta2_input.setFixedWidth(80)
+        self.beta2_input.setText("0.0")
+        h_top.addWidget(self.beta2_input)
 
         h_top.addSpacing(8)
         h_top.addWidget(QLabel("沉降速度 v_d:"))
@@ -1750,11 +1831,18 @@ class MonitorApp(QMainWindow):
         h_top.addWidget(self.cp_input)
 
         h_top.addSpacing(8)
-        h_top.addWidget(QLabel("受体花粉源强度 Q_recipient:"))
-        self.qr_input = QLineEdit()
-        self.qr_input.setFixedWidth(120)
-        self.qr_input.setText("0")
-        h_top.addWidget(self.qr_input)
+        h_top.addWidget(QLabel("基础源强 Q_base:"))
+        self.q_base_input = QLineEdit()
+        self.q_base_input.setFixedWidth(100)
+        self.q_base_input.setText("5e6")
+        h_top.addWidget(self.q_base_input)
+
+        h_top.addSpacing(8)
+        h_top.addWidget(QLabel("逃逸系数 Rd:"))
+        self.rd_input = QLineEdit()
+        self.rd_input.setFixedWidth(80)
+        self.rd_input.setText("0.50")
+        h_top.addWidget(self.rd_input)
 
         compute_btn = QPushButton("生成热力图")
         compute_btn.setFixedWidth(160)
@@ -1797,28 +1885,24 @@ class MonitorApp(QMainWindow):
         
         self.drift_fig = Figure(figsize=(18, 9), dpi=100)
         
-        # 1. 主网格：分为左右两部分
-        # width_ratios=[2, 1.2]: 左侧占约 62.5% 宽度，右侧占 37.5%
-        gs_main = self.drift_fig.add_gridspec(1, 2, width_ratios=[2, 1.2], wspace=0.15)
+        # 1行4列
+        gs = self.drift_fig.add_gridspec(1, 4, wspace=0.3)
         
-        # 2. 左侧子网格 (嵌套在 gs_main[0,0])：1行2列，用于两个热力图
-        # wspace=0.3: 两个热力图之间的间距
-        gs_left = gs_main[0, 0].subgridspec(1, 2, wspace=0.3)
+        # 按照用户要求的顺序：
+        # 1. 全局热力图 (地图叠加)
+        # 2. 中心连线基因漂移概率 (GM -> Non-GM) - 放在中间！
+        # 3. 非转基因区域热力图
+        # 4. 安全距离
         
-        # 3. 右侧子网格 (嵌套在 gs_main[0,1])：2行1列，用于两个统计图
-        # hspace=0.4: 上下两个统计图之间的垂直间距
-        gs_right = gs_main[0, 1].subgridspec(2, 1, hspace=0.4)
-        
-        # 初始化4个子图
-        # ax1: 左边第一个热力图 (改为全局花粉+轮廓)
-        self.drift_ax1 = self.drift_fig.add_subplot(gs_left[0, 0])
-        # ax2: 左边第二个热力图 (改为局部花粉+轮廓)
-        self.drift_ax2 = self.drift_fig.add_subplot(gs_left[0, 1])
-        # ax3: 右上统计图 (平均漂移概率)
-        self.drift_ax3 = self.drift_fig.add_subplot(gs_right[0, 0])
-        # ax4: 右下 (改为显示安全距离数值，不再绘制图表)
-        self.drift_ax4 = self.drift_fig.add_subplot(gs_right[1, 0])
-        self.drift_ax4.axis('off') # 关闭坐标轴用于显示纯文本
+        # ax1: 全局热力图 (地图叠加)
+        self.drift_ax1 = self.drift_fig.add_subplot(gs[0, 0])
+        # ax3: 中心连线基因漂移概率 (GM -> Non-GM) (现在放在第2列，即中间)
+        self.drift_ax3 = self.drift_fig.add_subplot(gs[0, 1])
+        # ax2: 非转基因区域热力图 (现在放在第3列)
+        self.drift_ax2 = self.drift_fig.add_subplot(gs[0, 2])
+        # ax4: 安全距离 (文本)
+        self.drift_ax4 = self.drift_fig.add_subplot(gs[0, 3])
+        self.drift_ax4.axis('off')
         
         # 调整全局边距
         self.drift_fig.subplots_adjust(left=0.05, right=0.98, top=0.92, bottom=0.15)
@@ -1859,22 +1943,37 @@ class MonitorApp(QMainWindow):
                 return
 
             # 2) 校验：非转基因区域
-            if not hasattr(self, 'non_gm_radius') or self.non_gm_radius is None:
-                self.show_error_message("尚未选定非转基因种植区。")
+            # 优先从 latest_model_data 参数中获取，以保持一致性
+            params = self.latest_model_data.get('params', {})
+            non_gm_radius = params.get('non_gm_radius')
+            if non_gm_radius is None:
+                # 回退到实例变量
+                non_gm_radius = getattr(self, 'non_gm_radius', None)
+            
+            if non_gm_radius is None:
+                self.show_error_message("尚未选定非转基因种植区（半径未知）。请重新运行模拟。")
                 self.loading_timer.stop()
                 return
+            
+            self.non_gm_radius = float(non_gm_radius) # 确保更新实例变量
 
-            # 3) 读取参数
+
+                        # 3) 读取参数
             try:
-                kp = float((self.kp_input.text() or "0.55").strip())
-                L = float((self.L_input.text() or "3.5").strip())
-                vd = float((self.vd_input.text() or "0.3").strip())
+                beta1 = float((self.beta1_input.text() or "1.5").strip())
+                beta2 = float((self.beta2_input.text() or "0.0").strip())
+                vd = float((self.vd_input.text() or "0.02").strip())
                 cp = float((self.cp_input.text() or "0.5").strip())
-                Q_rec = float((self.qr_input.text() or "0.1").strip())
-                if kp < 0 or L < 0 or vd <= 0 or not (0.0 < cp < 1.0) or Q_rec < 0:
-                    raise ValueError
-            except Exception:
-                self.show_error_message("请输入有效参数：k_p≥0, L≥0, v_d>0, 0<cp<1, Q_recipient≥0。")
+                
+                # 读取基础源强和逃逸系数
+                Q_base = float(self.q_base_input.text().strip() or "5e6")
+                Rd = float(self.rd_input.text().strip() or "0.50")
+
+                # 参数合法性校验 (注意：这里修正了你之前代码中 Q_rec 未定义的错误)
+                if beta1 < 0 or beta2 < 0 or vd <= 0 or not (0.0 < cp < 1.0) or Q_base < 0 or not (0.0 <= Rd <= 1.0):
+                    raise ValueError("参数范围错误：beta1≥0, beta2≥0, v_d>0, 0<cp<1, Q_base≥0, 0≤Rd≤1")
+            except Exception as e:
+                self.show_error_message(f"参数输入错误: {e}")
                 self.loading_timer.stop()
                 return
 
@@ -1890,21 +1989,16 @@ class MonitorApp(QMainWindow):
                 if x_full.shape[1] > 1:
                     dxy = float(x_full[0, 1] - x_full[0, 0])
 
-                # 获取源强 Q (用于供体和受体，假设两者单株产量相似)
-                # 优先从输入框获取，默认为 5e6
-                try:
-                    pollen_Q = float(self.q_factor_input.text().strip())
-                except:
-                    pollen_Q = 5000000.0
-
                 # 4) 启动后台线程计算
+                # 注意：参数传递已经更新，去掉了 pollen_factor_recipient，改为传递 Rd
                 self.drift_thread = DriftCalculatorThread(
                     x_full, y_full, conc_donor_full,
                     self.non_gm_radius,
-                    kp, L, vd, cp, 
+                    beta1, beta2, vd, cp, 
                     wind_speed, wind_dir, grid_km,
                     dxy=dxy,
-                    pollen_factor=pollen_Q
+                    pollen_factor=Q_base,  # 传递基础源强 Q_base
+                    Rd=Rd                  # 传递逃逸系数 Rd
                 )
                 self.drift_thread.finished.connect(self.on_drift_calculation_finished)
                 self.drift_thread.error.connect(self.on_drift_error)
@@ -1930,6 +2024,11 @@ class MonitorApp(QMainWindow):
     def on_drift_calculation_finished(self, x_full, y_full, G_full):
         """基因漂移计算完成回调"""
         try:
+            # 确保数据为 numpy 数组 (处理 GPU tensor)
+            if hasattr(x_full, 'cpu'): x_full = x_full.cpu().numpy()
+            if hasattr(y_full, 'cpu'): y_full = y_full.cpu().numpy()
+            if hasattr(G_full, 'cpu'): G_full = G_full.cpu().numpy()
+
             # 保存计算结果供导出
             self.latest_drift_data = {
                 "x": x_full,
@@ -2201,42 +2300,139 @@ class MonitorApp(QMainWindow):
                 print(f"[WARN] 绘制局部轮廓失败: {e}")
 
 
-            # === 图3：平均漂移概率分布 (Ax3) ===
-            # 需要提取 Non-GM 区域内的数据进行统计
-            # 找到 Non-GM 区域内的索引
-            radius_non = float(self.non_gm_radius)
-            # 假设 x_full, y_full 是 meshgrid，中心在 (0,0) (Non-GM center)
-            # 提取 [-radius, radius] 范围内的数据
+            # === 图3：转基因区域中心与非转基因区域中心连线上的基因漂移概率 (Ax3) ===
             
-            # 注意：x_full[0, :] 是 X 轴坐标
-            x_axis_full = x_full[0, :]
-            y_axis_full = y_full[:, 0]
+            # 0. 重新计算相对坐标 (确保 gm_off_x 等变量存在)
+            params = self.latest_model_data.get('params', {})
+            gm_center = params.get('gm_center')
+            non_gm_center = params.get('non_gm_center')
+            gm_radius = float(params.get('gm_radius', 0))
             
-            x_mask = (x_axis_full >= -radius_non) & (x_axis_full <= radius_non)
-            y_mask = (y_axis_full >= -radius_non) & (y_axis_full <= radius_non)
+            gm_off_x, gm_off_y = 0.0, 0.0
             
-            if np.any(x_mask) and np.any(y_mask):
-                # 提取子网格 G
-                G_sub = G_full[np.ix_(y_mask, x_mask)]
-                x_sub_axis = x_axis_full[x_mask]
+            if gm_center and non_gm_center:
+                # 计算中心点偏移 (meters)
+                import math
+                d_lng = float(gm_center['lng']) - float(non_gm_center['lng'])
+                d_lat = float(gm_center['lat']) - float(non_gm_center['lat'])
                 
-                # 计算平均值 (沿 Y 轴平均)
-                y_avg = np.mean(G_sub, axis=0)
+                mean_lat = (float(gm_center['lat']) + float(non_gm_center['lat'])) / 2.0
+                meters_per_deg_lat = 111000.0
+                meters_per_deg_lng = 111000.0 * math.cos(math.radians(mean_lat))
                 
-                self.drift_ax3.plot(x_sub_axis, y_avg, color='blue', linewidth=2)
-                self.drift_ax3.set_title(f"非转基因区域内平均漂移概率")
-                self.drift_ax3.set_xlabel("相对 X 坐标 (m)")
-                self.drift_ax3.set_ylabel("平均概率 (%)")
-                self.drift_ax3.grid(True, linestyle='--', alpha=0.7)
+                gm_off_x = d_lng * meters_per_deg_lng
+                gm_off_y = d_lat * meters_per_deg_lat
+
+            # 1. 确定起点与终点 (相对坐标)
+            # 起点：转基因区域中心 (gm_off_x, gm_off_y)
+            # 终点：非转基因区域中心 (0, 0)
+            start_point = (gm_off_x, gm_off_y)
+            end_point = (0.0, 0.0)
+            
+            # 2. 生成采样点 (沿连线)
+            import math
+            dist_total = math.sqrt((start_point[0]-end_point[0])**2 + (start_point[1]-end_point[1])**2)
+            if dist_total < 1.0:
+                dist_total = 1.0 # 避免除零错误
+            
+            num_points = 200 # 增加采样点以获得平滑曲线
+            t_values = np.linspace(0, 1, num_points)
+            
+            # 参数方程: P(t) = Start * (1-t) + End * t
+            x_line = start_point[0] * (1 - t_values) + end_point[0] * t_values
+            y_line = start_point[1] * (1 - t_values) + end_point[1] * t_values
+            
+            # Y轴为距离 GM 中心的距离 (注意：之前代码是 d_line = dist_total * t_values, 这里保持一致，因为 t=0 是 GM)
+            d_line = dist_total * t_values
+            
+            # 3. 双线性插值提取 G_full 的值
+            # x_full, y_full 是网格坐标矩阵 (rows, cols)
+            x_min, x_max = x_full.min(), x_full.max()
+            y_min, y_max = y_full.min(), y_full.max()
+            cols = x_full.shape[1]
+            rows = x_full.shape[0]
+            
+            # 计算网格步长
+            dx_step = (x_max - x_min) / (cols - 1) if cols > 1 else 1.0
+            dy_step = (y_max - y_min) / (rows - 1) if rows > 1 else 1.0
+            
+            z_line = []
+            for i in range(num_points):
+                xi = x_line[i]
+                yi = y_line[i]
                 
-                # 标出最大值
-                if len(y_avg) > 0:
-                    max_idx = np.argmax(y_avg)
-                    self.drift_ax3.plot(x_sub_axis[max_idx], y_avg[max_idx], 'ro')
-                    self.drift_ax3.text(x_sub_axis[max_idx], y_avg[max_idx], f"{y_avg[max_idx]:.2f}%", 
-                                       fontsize=9, verticalalignment='bottom')
-            else:
-                self.drift_ax3.text(0.5, 0.5, "区域太小无法统计", ha='center', va='center')
+                # 计算浮点索引
+                # x 对应 col, y 对应 row
+                c_idx = (xi - x_min) / dx_step
+                r_idx = (yi - y_min) / dy_step
+                
+                # 边界检查
+                if c_idx < 0 or c_idx > cols - 1 or r_idx < 0 or r_idx > rows - 1:
+                    z_line.append(0.0)
+                    continue
+                
+                # 整数索引 (左上角)
+                c0 = int(c_idx)
+                c1 = min(c0 + 1, cols - 1)
+                r0 = int(r_idx)
+                r1 = min(r0 + 1, rows - 1)
+                
+                # 局部权重 (距离左上角的偏移 0~1)
+                tx = c_idx - c0
+                ty = r_idx - r0
+                
+                # 获取四个邻近点的值
+                v00 = G_full[r0, c0]
+                v01 = G_full[r0, c1] 
+                v10 = G_full[r1, c0] 
+                v11 = G_full[r1, c1]
+                
+                # 双线性插值公式
+                val = (1 - tx) * (1 - ty) * v00 + \
+                      tx * (1 - ty) * v01 + \
+                      (1 - tx) * ty * v10 + \
+                      tx * ty * v11
+                z_line.append(val)
+            
+            z_line = np.array(z_line)
+
+            # 4. 绘图 (修改：X轴=漂移概率, Y轴=距离)
+            self.drift_ax3.plot(z_line, d_line, color='blue', linewidth=2)
+            self.drift_ax3.set_title(f"中心连线上基因漂移概率 (GM -> Non-GM)")
+            self.drift_ax3.set_xlabel("漂移概率 (%)")
+            self.drift_ax3.set_ylabel("距离 GM 区域中心的距离 (m)")
+            self.drift_ax3.grid(True, linestyle='--', alpha=0.7)
+            
+            # 反转 Y 轴，使 0 (GM) 在上方，距离越远越往下
+            self.drift_ax3.invert_yaxis()
+            
+            # 标尺辅助 (水平线)
+            # 注意：invert_yaxis 后，y=0 在顶部
+            self.drift_ax3.axhline(y=0, color='red', linestyle=':', alpha=0.5) # GM Center
+            self.drift_ax3.text(np.max(z_line)*0.05 if len(z_line)>0 else 0, 0, "GM", color='red', va='top', ha='left')
+            
+            self.drift_ax3.axhline(y=dist_total, color='blue', linestyle=':', alpha=0.5) # Non-GM Center
+            self.drift_ax3.text(np.max(z_line)*0.05 if len(z_line)>0 else 0, dist_total, "Non-GM", color='blue', va='bottom', ha='left')
+            
+            # 标出曲线上的最大值
+            if len(z_line) > 0:
+                max_idx = np.argmax(z_line)
+                max_val = z_line[max_idx]
+                if max_val > 0.01:
+                    self.drift_ax3.plot(max_val, d_line[max_idx], 'ro', markersize=5)
+                    self.drift_ax3.text(max_val, d_line[max_idx], f"{max_val:.2f}%", 
+                                       fontsize=9, ha='left', va='center', fontweight='bold')
+            
+            # 5. 在全局地图 (Ax1) 上绘制这条参考线
+            try:
+                self.drift_ax1.plot([start_point[0], end_point[0]], [start_point[1], end_point[1]],
+                                   color='yellow', linestyle='--', linewidth=1.5, marker='.', markersize=5, 
+                                   label='Profile Line')
+                # 添加文本标注
+                self.drift_ax1.text(start_point[0], start_point[1], "Start", color='yellow', fontsize=8, ha='right')
+                self.drift_ax1.text(end_point[0], end_point[1], "End", color='yellow', fontsize=8, ha='left')
+            except Exception as e:
+                print(f"[WARN] 绘制参考线失败: {e}")
 
 
             # === 计算安全距离 (显示在 Ax4 位置) ===
@@ -2277,10 +2473,10 @@ class MonitorApp(QMainWindow):
                 try: self.drift_cbar.remove()
                 except: pass
             
-            # 放在 ax1 和 ax2 的下方
-            self.drift_cbar = self.drift_fig.colorbar(im1, ax=[self.drift_ax1, self.drift_ax2], 
-                                                    orientation='horizontal', 
-                                                    fraction=0.08, pad=0.15, aspect=40)
+            # 放在 ax2 (非转基因区域热力图) 的右侧，竖直放置
+            self.drift_cbar = self.drift_fig.colorbar(im1, ax=self.drift_ax2, 
+                                                    orientation='vertical', 
+                                                    fraction=0.046, pad=0.04)
             self.drift_cbar.set_label("基因漂移概率 (%)")
             
             self.drift_canvas.draw()
@@ -2341,7 +2537,7 @@ class MonitorApp(QMainWindow):
             g = self.latest_drift_data['G_percent']
 
             import csv
-            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+            with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f)
                 
                 writer.writerow(["=== 基因漂移概率数据 (矩阵格式: 行=Y坐标, 列=X坐标) ==="])
@@ -2355,12 +2551,23 @@ class MonitorApp(QMainWindow):
                 header = ["Y \ X (m)"] + [f"{val:.2f}" for val in x_coords]
                 writer.writerow(header)
                 
+                # 检查数据统计信息
+                g_max = np.max(g)
+                g_min = np.min(g)
+                g_mean = np.mean(g)
+                print(f"[ExportCSV] G_percent stats: max={g_max}, min={g_min}, mean={g_mean}")
+
+                if g_max == 0:
+                    QMessageBox.warning(self, "数据警告", "导出的基因漂移概率全为 0。\n可能原因：非转基因区域设置过小，或源强过低。")
+                
                 # 逐行写入数据
                 # 为了直观对应地图，从最后一行(y_max)开始写到第一行(y_min)
+                # 使用科学计数法保留精度，如果值很小但非0
                 for r in range(rows - 1, -1, -1):
                     y_val = y[r, 0]
                     # 构建当前行: [y_val, g_0, g_1, ...]
-                    row_data = [f"{y_val:.2f}"] + [f"{val:.4f}" for val in g[r, :]]
+                    # 使用 %.6g 自动选择合适的格式 (小数或科学计数法)
+                    row_data = [f"{y_val:.2f}"] + [f"{val:.6g}" for val in g[r, :]]
                     writer.writerow(row_data)
 
             QMessageBox.information(self, "导出成功", f"数据已保存至：\n{file_path}")
@@ -2792,12 +2999,26 @@ class MonitorApp(QMainWindow):
     def export_csv(self):
         """导出数据为CSV文件"""
         path, _ = QFileDialog.getSaveFileName(self, "保存CSV", "监测数据.csv", "CSV Files (*.csv)")
-        if path:
+        if not path:
+            return
+
+        try:
             with open(path, 'w', newline='', encoding='utf-8-sig') as f:
                 writer = csv.writer(f)
-                writer.writerow(["时间", "温度", "湿度", "风速", "风向"])
-                writer.writerows(self.data_log)
-            QMessageBox.information(self, "成功", "数据已导出")
+                
+                # 优先导出硬件数据
+                if hasattr(self, 'hardware_data_log') and self.hardware_data_log:
+                    writer.writerow(["时间", "温度", "湿度", "风速", "风向", "纬度", "经度"])
+                    writer.writerows(self.hardware_data_log)
+                    count = len(self.hardware_data_log)
+                else:
+                    writer.writerow(["时间", "温度", "湿度", "风速", "风向"])
+                    writer.writerows(self.data_log)
+                    count = len(self.data_log)
+                
+            QMessageBox.information(self, "成功", f"数据已导出，共 {count} 条记录")
+        except Exception as e:
+            self.show_error_message(f"导出失败: {str(e)}")
 
     def show_error_message(self, message):
         """显示错误消息对话框"""
@@ -2861,73 +3082,3 @@ class MonitorApp(QMainWindow):
             )
         except Exception as e:
             self.show_error_message(f"定位出错：{e}")
-
-    def calculate_drift_heatmap(self):
-        """计算并绘制基因漂移概率的二维热力图（基于最近一次模拟的浓度场）。
-        概率公式：G = (A * D_d) / (A * D_d + D_r)，其中 D = e^{-k_p L} * C * v_d。
-        """
-        try:
-            # 1) 最近一次模型数据
-            if not hasattr(self, 'latest_model_data') or self.latest_model_data is None:
-                self.show_error_message("尚无模拟结果。请先在‘花粉浓度扩散’页点击‘运行模拟’。")
-                return
-            x = self.latest_model_data.get("x")
-            y = self.latest_model_data.get("y")
-            conc = self.latest_model_data.get("conc")
-            if x is None or y is None or conc is None:
-                self.show_error_message("模拟结果不完整，无法计算热力图。")
-                return
-
-            # 2) 读取参数
-            try:
-                kp = float((self.kp_input.text() or "0.3").strip())
-                L = float((self.L_input.text() or "2.0").strip())
-                vd = float((self.vd_input.text() or "0.02").strip())
-                cp = float((self.cp_input.text() or "0.5").strip())
-                C_rec = float((self.crec_input.text() or "10.0").strip())
-                if kp < 0 or L < 0 or vd <= 0 or not (0 < cp <= 0.5) or C_rec < 0:
-                    raise ValueError
-            except Exception:
-                self.show_error_message("请输入有效参数：k_p≥0, L≥0, v_d>0, 0< c_p ≤0.5, C_rec≥0。")
-                return
-
-            # 3) 概率场
-            decay = np.exp(-kp * L)
-            C = np.maximum(conc, 0.0)
-            D_d = decay * C * vd
-            D_r = decay * max(C_rec, 0.0) * vd
-            A = (cp / (1.0 - cp))**2
-            prob_grid = (A * D_d) / (A * D_d + D_r + 1e-12)
-            prob_grid = np.clip(prob_grid, 0.0, 1.0)
-
-            # 4) 绘制热力图
-            self.drift_ax.clear()
-            xmin, xmax = float(np.min(x)), float(np.max(x))
-            ymin, ymax = float(np.min(y)), float(np.max(y))
-            im = self.drift_ax.imshow(
-                prob_grid, origin='lower', extent=[xmin, xmax, ymin, ymax],
-                cmap='inferno', vmin=0.0, vmax=1.0, aspect='equal'
-            )
-            self.drift_ax.set_xlabel("x (m)")
-            self.drift_ax.set_ylabel("y (m)")
-            self.drift_ax.set_title("基因漂移概率热力图 G(x,y)")
-
-            # 色标
-            divider = make_axes_locatable(self.drift_ax)
-            cax = divider.append_axes("right", size="5%", pad=0.05)
-            cb = self.drift_fig.colorbar(im, cax=cax)
-            cb.set_label("概率")
-
-            self.drift_canvas.draw()
-
-            # 5) 文本摘要
-            pmax = float(np.max(prob_grid))
-            self.drift_result.setText(
-                f"热力图生成完成：最大概率≈{pmax*100:.2f}%（k_p={kp:g}, L={L:g}, v_d={vd:g}, c_p={cp:g}, C_rec={C_rec:g}）。上风向区域概率将接近 0，这是正常现象。"
-            )
-
-            if hasattr(self, 'drift_ready_label') and self.drift_ready_label:
-                self.drift_ready_label.setText("已基于最近模拟结果计算完成（热力图）")
-
-        except Exception as e:
-            self.show_error_message(f"热力图计算出错：{e}")
