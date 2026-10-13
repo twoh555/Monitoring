@@ -47,7 +47,7 @@ Monitoring/
 - 硬件（可选）：CH340 USB 转串口、STM32 / Modbus 气象传感器、GPS 模块
 - GPU（可选）：NVIDIA 显卡 + CUDA + PyTorch GPU 版
 
- 快速启动
+** 快速启动**
  1. 克隆项目
 ```bash
 git clone https://github.com/twoh555/main.git
@@ -131,21 +131,27 @@ python main.py
 建议配置：NVIDIA 显卡（8GB 显存以上）、CUDA 11.8 / 12.1、对应版本的 PyTorch。
 
 
- 构建分发包
+** 构建分发包**
 如需将程序打包为 Windows 可执行文件，可使用 PyInstaller：
 
 ```bash
-pip install pyinstaller
-pyinstaller --noconfirm --clean --windowed --name PollenDriftMonitor ^
-  --collect-all PyQt5 ^
-  --collect-all PyQtWebEngine ^
-  --hidden-import PyQt5.QtWebEngineWidgets ^
-  --hidden-import PyQt5.QtWebEngineCore ^
-  code/main.py
+python -m pip install pyinstaller
+python -m pip install pyserial
+python -m PyInstaller --noconfirm --clean --console --name PollenDriftMonitor
+--collect-all PyQt5
+--collect-all PyQtWebEngine
+--hidden-import PyQt5
+--hidden-import PyQt5.sip
+--hidden-import PyQt5.QtWebEngineWidgets
+--hidden-import PyQt5.QtWebEngineCore
+--hidden-import serial
+--hidden-import serial.tools.list_ports main.py
 ```
 
 打包完成后，`dist/PollenDriftMonitor/` 文件夹内即为可执行程序，可压缩后上传至 GitHub Releases。
-
+也可以在dist目录下运行：
+cd dist\PollenDriftMonitor
+.\PollenDriftMonitor.exe
 
  常见问题
 Q：地图不显示怎么办？  
